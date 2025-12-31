@@ -321,6 +321,16 @@ def process_pdf(
             voters = ocr_processor.get_all_voters()
             document.add_voters(voters)
             logger.info(f"Extracted {len(voters)} voter records")
+            
+            # Save page-wise data
+            from collections import defaultdict
+            voters_by_page = defaultdict(list)
+            for voter in voters:
+                voters_by_page[voter.page_id].append(voter)
+            
+            for page_id, page_voters in voters_by_page.items():
+                page_path = store.save_page(context.pdf_name, page_id, page_voters)
+                logger.debug(f"Saved page data: {page_path}")
         else:
             logger.warning("OCR processing failed")
     
@@ -397,14 +407,25 @@ def process_extracted_folder(
             voters = ocr_processor.get_all_voters()
             document.add_voters(voters)
             logger.info(f"Extracted {len(voters)} voter records")
+            
+            # Save page-wise data
+            from collections import defaultdict
+            voters_by_page = defaultdict(list)
+            for voter in voters:
+                voters_by_page[voter.page_id].append(voter)
+            
+            for page_id, page_voters in voters_by_page.items():
+                page_path = store.save_page(context.pdf_name, page_id, page_voters)
+                logger.debug(f"Saved page data: {page_path}")
     
     # Finalize
     document.status = "completed"
     document.stats.total_time_seconds = timer.elapsed
     
-    # Save combined output
-    output_path = store.save_document(document)
-    logger.info(f"Saved output: {output_path}")
+    # Save combined output (only if OCR was run, as crop-only has no voter data)
+    if args.step in ["ocr", "all"]:
+        output_path = store.save_document(document)
+        logger.info(f"Saved output: {output_path}")
     
     return document
 

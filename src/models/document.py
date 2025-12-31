@@ -126,23 +126,23 @@ class ProcessedDocument:
     
     def add_voters(self, voters: List[Voter]) -> None:
         """
-        Add voters from a flat list, grouping by source_image.
+        Add voters from a flat list, grouping by image_file.
         
         This is a convenience method for adding voters when page data
         is not already structured.
         """
         from collections import defaultdict
         
-        # Group voters by page (derived from source_image)
+        # Group voters by page (derived from image_file)
         by_page = defaultdict(list)
         for voter in voters:
-            # Extract page_id from source_image (e.g., "page-004-001.png" -> "page-004")
-            if voter.source_image:
-                parts = voter.source_image.split("-")
+            # Extract page_id from image_file (e.g., "page-004-001.png" -> "page-004")
+            if voter.image_file:
+                parts = voter.image_file.split("-")
                 if len(parts) >= 2:
                     page_id = f"{parts[0]}-{parts[1]}"
                 else:
-                    page_id = voter.source_image
+                    page_id = voter.image_file
             else:
                 page_id = "unknown"
             by_page[page_id].append(voter)

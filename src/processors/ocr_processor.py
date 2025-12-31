@@ -112,17 +112,35 @@ class OCRResult:
     
     def to_voter(self, sequence_in_page: int = 0) -> Voter:
         """Convert to Voter model."""
+        # Use sequence_in_page as serial_no since OCR struggles with reading it
+        serial_no = str(sequence_in_page) if sequence_in_page > 0 else self.serial_no
+        
+        # Calculate extraction confidence based on field completeness
+        fields_present = sum([
+            bool(self.epic_no and self.epic_valid),  # 30%
+            bool(self.name),  # 25%
+            bool(self.relation_type and self.relation_name),  # 20%
+            bool(self.house_no),  # 10%
+            bool(self.age),  # 10%
+            bool(self.gender),  # 5%
+        ])
+        confidence_weights = [0.30, 0.25, 0.20, 0.10, 0.10, 0.05]
+        extraction_confidence = sum(confidence_weights[i] for i in range(fields_present))
+        
         return Voter(
-            serial_no=self.serial_no,
+            serial_no=serial_no,
             epic_no=self.epic_no,
             name=self.name,
             relation_type=self.relation_type,
             relation_name=self.relation_name,
             house_no=self.house_no,
-            age=int(self.age) if self.age.isdigit() else None,
+            age=self.age,
             gender=self.gender,
             sequence_in_page=sequence_in_page,
-            source_image=self.image_name,
+            image_file=self.image_name,
+            epic_valid=self.epic_valid,
+            processing_time_ms=round(self.elapsed_seconds * 1000, 2),
+            extraction_confidence=round(extraction_confidence, 2),
         )
 
 
@@ -410,7 +428,9 @@ class OCRProcessor(BaseProcessor):
         """Run full OCR on image."""
         img = Image.open(image_path)
         try:
-            config = "--oem 1 --psm 6"
+            # Use PSM 3 (fully automatic page segmentation) for better layout detection
+            # PSM 6 misses lines in voter cards with varied layout
+            config = "--oem 1 --psm 3"
             return pytesseract.image_to_data(
                 img,
                 lang=self.languages,
@@ -461,7 +481,8 @@ class OCRProcessor(BaseProcessor):
         """Extract value after label and separator."""
         norm_line = self._normalize_line(line)
         
-        pattern = rf"(?:{label_pattern})\s*[:\-–—]?\s*[:\-–—]\s*(.+?)(?:\s*[\-–—]\s*$|\s*$)"
+        # Try pattern with at least one separator (colon, dash, etc.)
+        pattern = rf"(?:{label_pattern})\s*[:\-–—]+\s*(.+?)(?:\s*[\-–—]\s*$|\s*$)"
         match = re.search(pattern, norm_line, re.IGNORECASE | re.UNICODE)
         
         if match:
@@ -519,6 +540,22 @@ class OCRProcessor(BaseProcessor):
             norm = self._normalize_line(line)
             
             if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
+                # Try direct extraction with single colon/separator
+                # Pattern: வீட்டு எண் : 1 or house no : 1
+                direct_match = re.search(
+                    rf"(?:{combined_pattern})\s*[:\-–—]\s*(\d[\dA-Za-z/\-]*)",
+                    norm,
+                    re.IGNORECASE | re.UNICODE
+                )
+                if direct_match:
+                    house_val = direct_match.group(1).strip()
+                    # Clean up any trailing noise
+                    house_val = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", house_val, flags=re.IGNORECASE)
+                    house_val = house_val.strip()
+                    if house_val and len(house_val) <= 15:
+                        return house_val
+                
+                # Fallback to _extract_value_after_colon
                 value = self._extract_value_after_colon(line, combined_pattern)
                 value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", value, flags=re.IGNORECASE)
                 value = re.sub(r"\s+", "", value)

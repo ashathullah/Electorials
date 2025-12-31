@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""
+Electoral Roll PDF Processing - Main Entry Point
+
+Unified entry point for processing Electoral Roll PDFs:
+- Extract images from PDFs
+- Extract metadata using AI
+- Crop voter information boxes
+- OCR voter data extraction
+- Generate combined output
+
+Usage:
+    python main.py                           # Process all PDFs
+    python main.py path1.pdf path2.pdf       # Process specific PDFs
+    python main.py s3://bucket/path.pdf      # Process PDF from S3
+    python main.py --step extract            # Run specific step only
+    python main.py --list                    # List available extracted folders
+
+Environment Variables:
+    DEBUG=1                 Enable debug logging
+    AI_API_KEY             API key for AI metadata extraction
+    AI_PROVIDER            AI provider (gemini, openai)
+    AI_MODEL               AI model name
+    
+    # S3 Configuration (for S3 URLs)
+    AWS_ACCESS_KEY_ID      AWS access key
+    AWS_SECRET_ACCESS_KEY  AWS secret key
+    AWS_REGION             AWS region (default: ap-south-1)
+    S3_DEFAULT_BUCKET      Default S3 bucket
+
+Examples:
+    # Process all PDFs in pdfs/ directory
+    python main.py
+
+    # Process specific PDFs
+    python main.py pdfs/roll1.pdf pdfs/roll2.pdf
+
+    # Process PDF from S3
+    python main.py s3://my-bucket/electoral-rolls/roll1.pdf
+
+    # Run only extraction step
+    python main.py --step extract
+
+    # Run only OCR on already extracted folders
+    python main.py --step ocr
+
+    # Enable debug mode
+    DEBUG=1 python main.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional, Union
+
+from src.config import Config, get_config
+from src.logger import get_logger, setup_logger
+from src.models import ProcessedDocument, ProcessingStats
+from src.persistence import JSONStore
+from src.processors import (
+    ProcessingContext,
+    PDFExtractor,
+    MetadataExtractor,
+    ImageCropper,
+    OCRProcessor,
+)
+from src.utils.file_utils import iter_pdfs, iter_extracted_folders
+from src.utils.timing import Timer
+from src.utils.s3_utils import is_s3_url, download_from_s3
+
+
+logger = get_logger("main")
+
+
+def resolve_pdf_path(path_str: str, config: Config) -> Optional[Path]:
+    """
+    Resolve a PDF path from string input.
+    
+    Handles:
+    - Local file paths
+    - S3 URLs (s3://bucket/key)
+    - HTTPS S3 URLs (https://bucket.s3.amazonaws.com/key)
+    
+    Args:
+        path_str: Path string or S3 URL
+        config: Application configuration
+        
+    Returns:
+        Local Path to PDF (downloaded if from S3), or None if invalid
+    """
+    # Check if it's an S3 URL
+    if is_s3_url(path_str):
+        logger.info(f"Detected S3 URL: {path_str}")
+        try:
+            # Download to temp/configured directory
+            download_dir = Path(config.s3.download_dir) if config.s3.download_dir else None
+            local_path = download_from_s3(path_str, config.s3, download_dir=download_dir)
+            logger.info(f"Downloaded S3 file to: {local_path}")
+            return local_path
+        except Exception as e:
+            logger.error(f"Failed to download from S3: {e}")
+            return None
+    
+    # Local path
+    local_path = Path(path_str)
+    
+    # Handle relative paths
+    if not local_path.is_absolute():
+        # Try relative to current directory
+        if local_path.exists():
+            return local_path.resolve()
+        # Try relative to pdfs directory
+        pdf_in_pdfs = config.pdfs_dir / local_path
+        if pdf_in_pdfs.exists():
+            return pdf_in_pdfs
+    
+    if local_path.exists():
+        return local_path.resolve()
+    
+    logger.warning(f"File not found: {path_str}")
+    return None
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Electoral Roll PDF Processing Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        type=str,
+        help="PDF files or S3 URLs to process. Supports local paths and s3://bucket/key URLs. "
+             "If not specified, processes all PDFs in pdfs/ directory.",
+    )
+    
+    parser.add_argument(
+        "--step",
+        choices=["extract", "metadata", "crop", "ocr", "all"],
+        default="all",
+        help="Run specific processing step (default: all)",
+    )
+    
+    parser.add_argument(
+        "--folder",
+        type=str,
+        default="",
+        help="Process only a specific extracted folder (for crop/ocr steps)",
+    )
+    
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available extracted folders and exit",
+    )
+    
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force reprocessing even if output exists",
+    )
+    
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Limit processing to first N items (0 = all)",
+    )
+    
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=200,
+        help="DPI for PDF rendering (default: 200)",
+    )
+    
+    parser.add_argument(
+        "--languages",
+        type=str,
+        default="eng+tam",
+        help="OCR languages (default: eng+tam)",
+    )
+    
+    parser.add_argument(
+        "--diagram-filter",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Diagram/photo filter for cropping (default: auto)",
+    )
+    
+    parser.add_argument(
+        "--skip-metadata",
+        action="store_true",
+        help="Skip AI metadata extraction",
+    )
+    
+    parser.add_argument(
+        "--dump-raw-ocr",
+        action="store_true",
+        help="Dump raw OCR text for debugging",
+    )
+    
+    return parser.parse_args()
+
+
+def list_extracted_folders(config: Config) -> None:
+    """List all extracted folders."""
+    logger.info("Extracted folders:")
+    
+    store = JSONStore(config.extracted_dir)
+    
+    for folder in iter_extracted_folders(config.extracted_dir):
+        name = folder.name
+        has_metadata = store.metadata_exists(name)
+        has_output = store.document_exists(name)
+        
+        # Count images and crops
+        images_dir = folder / "images"
+        crops_dir = folder / "crops"
+        
+        images_count = len(list(images_dir.glob("*.png"))) if images_dir.exists() else 0
+        crops_count = sum(1 for _ in crops_dir.rglob("*.png")) if crops_dir.exists() else 0
+        
+        status_parts = []
+        if has_metadata:
+            status_parts.append("metadata")
+        if has_output:
+            status_parts.append("processed")
+        
+        status = ", ".join(status_parts) if status_parts else "extracted only"
+        
+        logger.info(f"  {name}: {images_count} pages, {crops_count} crops [{status}]")
+
+
+def process_pdf(
+    pdf_path: Path,
+    config: Config,
+    args: argparse.Namespace,
+) -> Optional[ProcessedDocument]:
+    """
+    Process a single PDF through the complete pipeline.
+    
+    Args:
+        pdf_path: Path to PDF file
+        config: Configuration
+        args: Command line arguments
+    
+    Returns:
+        ProcessedDocument if successful, None otherwise
+    """
+    timer = Timer()
+    
+    logger.info(f"Processing: {pdf_path.name}")
+    
+    # Create processing context
+    context = ProcessingContext(config=config)
+    context.setup_paths_from_pdf(pdf_path)
+    
+    # Initialize persistence
+    store = JSONStore(config.extracted_dir)
+    
+    # Create document
+    document = ProcessedDocument(
+        id=context.pdf_name,
+        pdf_name=context.pdf_name,
+        pdf_path=str(pdf_path),
+    )
+    
+    # Step 1: Extract images from PDF
+    if args.step in ["extract", "all"]:
+        logger.info("Step 1: Extracting images from PDF...")
+        
+        extractor = PDFExtractor(context, dpi=args.dpi)
+        if not extractor.run():
+            document.status = "failed"
+            document.error = "PDF extraction failed"
+            return document
+        
+        context.total_pages = extractor.result.total_pages
+        document.pages_count = context.total_pages
+    
+    # Step 2: Extract metadata using AI
+    if args.step in ["metadata", "all"] and not args.skip_metadata:
+        logger.info("Step 2: Extracting metadata using AI...")
+        
+        metadata_extractor = MetadataExtractor(context, force=args.force)
+        if metadata_extractor.run() and metadata_extractor.result:
+            document.metadata = metadata_extractor.result
+            store.save_metadata(context.pdf_name, metadata_extractor.result)
+    
+    # Step 3: Crop voter boxes
+    if args.step in ["crop", "all"]:
+        logger.info("Step 3: Cropping voter boxes...")
+        
+        cropper = ImageCropper(context, diagram_filter=args.diagram_filter)
+        if not cropper.run():
+            logger.warning("Cropping failed or no crops found")
+        elif cropper.summary:
+            logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
+    
+    # Step 4: OCR extraction
+    if args.step in ["ocr", "all"]:
+        logger.info("Step 4: Running OCR extraction...")
+        
+        ocr_processor = OCRProcessor(
+            context,
+            languages=args.languages,
+            dump_raw_ocr=args.dump_raw_ocr,
+        )
+        
+        if ocr_processor.run():
+            voters = ocr_processor.get_all_voters()
+            document.add_voters(voters)
+            logger.info(f"Extracted {len(voters)} voter records")
+        else:
+            logger.warning("OCR processing failed")
+    
+    # Finalize
+    document.status = "completed"
+    document.stats.total_time_seconds = timer.elapsed
+    
+    # Save combined output
+    if args.step in ["ocr", "all"]:
+        output_path = store.save_document(document)
+        logger.info(f"Saved output: {output_path}")
+    
+    return document
+
+
+def process_extracted_folder(
+    folder: Path,
+    config: Config,
+    args: argparse.Namespace,
+) -> Optional[ProcessedDocument]:
+    """
+    Process an already-extracted folder (for crop/ocr steps).
+    
+    Args:
+        folder: Path to extracted folder
+        config: Configuration
+        args: Command line arguments
+    
+    Returns:
+        ProcessedDocument if successful, None otherwise
+    """
+    timer = Timer()
+    
+    logger.info(f"Processing folder: {folder.name}")
+    
+    # Create processing context
+    context = ProcessingContext(config=config)
+    context.setup_paths_from_extracted(folder)
+    
+    # Initialize persistence
+    store = JSONStore(config.extracted_dir)
+    
+    # Create document
+    document = ProcessedDocument(
+        id=context.pdf_name,
+        pdf_name=context.pdf_name,
+    )
+    
+    # Load existing metadata if available
+    existing_metadata = store.load_metadata(context.pdf_name)
+    if existing_metadata:
+        from src.models import DocumentMetadata
+        document.metadata = DocumentMetadata.from_ai_response(existing_metadata)
+    
+    # Step: Crop voter boxes
+    if args.step in ["crop", "all"]:
+        logger.info("Cropping voter boxes...")
+        
+        cropper = ImageCropper(context, diagram_filter=args.diagram_filter)
+        if cropper.run() and cropper.summary:
+            logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
+    
+    # Step: OCR extraction
+    if args.step in ["ocr", "all"]:
+        logger.info("Running OCR extraction...")
+        
+        ocr_processor = OCRProcessor(
+            context,
+            languages=args.languages,
+            dump_raw_ocr=args.dump_raw_ocr,
+        )
+        
+        if ocr_processor.run():
+            voters = ocr_processor.get_all_voters()
+            document.add_voters(voters)
+            logger.info(f"Extracted {len(voters)} voter records")
+    
+    # Finalize
+    document.status = "completed"
+    document.stats.total_time_seconds = timer.elapsed
+    
+    # Save combined output
+    output_path = store.save_document(document)
+    logger.info(f"Saved output: {output_path}")
+    
+    return document
+
+
+def main() -> int:
+    """Main entry point."""
+    args = parse_args()
+    
+    # Setup logging
+    setup_logger()
+    
+    # Load configuration
+    config = Config()
+    
+    logger.info("Electoral Roll PDF Processing Pipeline")
+    logger.info(f"Debug mode: {'enabled' if config.debug else 'disabled'}")
+    
+    # Handle --list
+    if args.list:
+        list_extracted_folders(config)
+        return 0
+    
+    # Determine what to process
+    total_timer = Timer()
+    
+    results: List[ProcessedDocument] = []
+    
+    if args.step in ["crop", "ocr"] and not args.paths:
+        # Process extracted folders
+        folders = list(iter_extracted_folders(config.extracted_dir))
+        
+        if args.folder:
+            folders = [f for f in folders if f.name == args.folder]
+        
+        if args.limit > 0:
+            folders = folders[:args.limit]
+        
+        if not folders:
+            logger.error("No extracted folders found")
+            return 1
+        
+        logger.info(f"Processing {len(folders)} extracted folder(s)")
+        
+        for folder in folders:
+            doc = process_extracted_folder(folder, config, args)
+            if doc:
+                results.append(doc)
+    
+    else:
+        # Process PDFs (local or S3)
+        pdfs: List[Path] = []
+        
+        if args.paths:
+            # Resolve each path (handles S3 URLs and local paths)
+            for path_str in args.paths:
+                resolved = resolve_pdf_path(path_str, config)
+                if resolved:
+                    pdfs.append(resolved)
+                else:
+                    logger.warning(f"Skipping invalid path: {path_str}")
+        else:
+            # Default: process all PDFs in pdfs directory
+            pdfs = list(iter_pdfs(config.pdfs_dir))
+        
+        if args.limit > 0:
+            pdfs = pdfs[:args.limit]
+        
+        if not pdfs:
+            logger.error("No PDF files found")
+            return 1
+        
+        logger.info(f"Processing {len(pdfs)} PDF(s)")
+        
+        for pdf_path in pdfs:
+            doc = process_pdf(pdf_path, config, args)
+            if doc:
+                results.append(doc)
+    
+    # Summary
+    total_time = total_timer.elapsed
+    
+    successful = len([r for r in results if r.status == "completed"])
+    failed = len([r for r in results if r.status == "failed"])
+    total_voters = sum(r.total_voters for r in results)
+    
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"Documents processed: {successful}/{len(results)}")
+    logger.info(f"Failed: {failed}")
+    logger.info(f"Total voters extracted: {total_voters}")
+    logger.info(f"Total time: {total_time:.2f}s")
+    
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

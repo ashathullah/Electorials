@@ -474,6 +474,355 @@ def _words_from_ocr_data(data: dict[str, Any], *, filter_low_conf: bool = True) 
     return out
 
 
+# =====================================================================
+# LINE-BASED TEXT EXTRACTION (NEW APPROACH)
+# =====================================================================
+# Instead of relying on word-box token matching (which is fragile with
+# Tamil OCR), this approach reconstructs full lines from OCR data and
+# uses regex patterns to extract values. This is much more robust.
+# =====================================================================
+
+
+def _reconstruct_lines_from_ocr_data(data: dict[str, Any]) -> list[str]:
+    """
+    Reconstruct full text lines from Tesseract image_to_data output.
+    Groups words by (block, par, line) and joins them with spaces.
+    Returns list of line strings in order.
+    """
+    n = len(data.get("text", []))
+    lines_dict: dict[tuple[int, int, int], list[tuple[int, str]]] = {}
+    
+    for i in range(n):
+        txt = (data["text"][i] or "").strip()
+        if not txt:
+            continue
+        
+        block = int(data.get("block_num", [0] * n)[i])
+        par = int(data.get("par_num", [0] * n)[i])
+        line = int(data.get("line_num", [0] * n)[i])
+        x = int(data["left"][i])
+        
+        key = (block, par, line)
+        if key not in lines_dict:
+            lines_dict[key] = []
+        lines_dict[key].append((x, txt))
+    
+    # Sort keys to maintain reading order, then join words in each line by x position
+    result = []
+    for key in sorted(lines_dict.keys()):
+        words = sorted(lines_dict[key], key=lambda t: t[0])
+        line_text = " ".join(w[1] for w in words)
+        result.append(line_text)
+    
+    return result
+
+
+def _normalize_line_for_matching(line: str) -> str:
+    """
+    Normalize a line for pattern matching:
+    - Remove zero-width chars
+    - Normalize whitespace
+    - Keep Tamil and ASCII chars
+    """
+    s = line.strip()
+    # Remove zero-width chars
+    s = s.replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    # Normalize whitespace
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _extract_value_after_colon(line: str, label_pattern: str) -> str:
+    """
+    Generic extractor: finds label pattern and extracts value after : or - separator.
+    Returns the value portion cleaned up.
+    """
+    norm_line = _normalize_line_for_matching(line)
+    
+    # Try to match label followed by separator and value
+    # Pattern: label ... [:|-|—] ... value ... [-|end]
+    pattern = rf"(?:{label_pattern})\s*[:\-–—]?\s*[:\-–—]\s*(.+?)(?:\s*[\-–—]\s*$|\s*$)"
+    match = re.search(pattern, norm_line, re.IGNORECASE | re.UNICODE)
+    if match:
+        value = match.group(1).strip()
+        # Remove trailing separators and "Photo is available" type text
+        value = re.sub(r"\s*[\-–—]\s*$", "", value)
+        value = re.sub(r"\s*(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+        return value.strip()
+    
+    return ""
+
+
+def _extract_name_from_lines(lines: list[str]) -> str:
+    """Extract name from line containing பெயர் : or Name :"""
+    # Pattern for name line - but NOT relation lines (father/mother/husband)
+    name_patterns = [
+        r"^பெயர்",                    # Tamil: starts with பெயர்
+        r"^name\b",                   # English: starts with name
+    ]
+    
+    # Patterns to EXCLUDE (relation lines that also contain பெயர்)
+    exclude_patterns = [
+        r"தந்தை",      # Father
+        r"தாய்",       # Mother  
+        r"கணவர்",      # Husband
+        r"father",
+        r"mother", 
+        r"husband",
+    ]
+    
+    for line in lines:
+        norm = _normalize_line_for_matching(line).lower()
+        
+        # Skip relation lines
+        if any(re.search(p, norm, re.IGNORECASE) for p in exclude_patterns):
+            continue
+        
+        # Check if it's a name line
+        for pattern in name_patterns:
+            if re.search(pattern, norm, re.IGNORECASE | re.UNICODE):
+                # Extract value after the label
+                value = _extract_value_after_colon(line, r"(?:பெயர்|name)")
+                if value:
+                    return value
+    
+    return ""
+
+
+def _extract_relation_from_lines(lines: list[str]) -> tuple[str, str]:
+    """
+    Extract relation_type and relation_name from lines.
+    Detects: Father (தந்தையின் பெயர்), Mother (தாயின் பெயர்), Husband (கணவர் பெயர்)
+    Returns: (relation_type, relation_name)
+    """
+    relation_patterns = {
+        "father": [
+            r"தந்தையின்\s*பெயர்",
+            r"தந்தை\s*பெயர்",
+            r"father'?s?\s*name",
+            r"father",
+        ],
+        "mother": [
+            r"தாயின்\s*பெயர்",
+            r"தாய்\s*பெயர்",
+            r"mother'?s?\s*name",
+            r"mother",
+        ],
+        "husband": [
+            r"கணவர்\s*பெயர்",
+            r"கணவர்",
+            r"husband'?s?\s*name",
+            r"husband",
+        ],
+    }
+    
+    for line in lines:
+        norm = _normalize_line_for_matching(line)
+        
+        for rel_type, patterns in relation_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, norm, re.IGNORECASE | re.UNICODE):
+                    # Build full label pattern for extraction
+                    label_pattern = r"(?:" + "|".join(patterns) + r")"
+                    value = _extract_value_after_colon(line, label_pattern)
+                    
+                    # Clean up - remove any "பெயர்" that might be left over
+                    value = re.sub(r"^பெயர்\s*[:\-–—]?\s*", "", value)
+                    value = re.sub(r"^name\s*[:\-–—]?\s*", "", value, flags=re.IGNORECASE)
+                    
+                    if value:
+                        return rel_type, value.strip()
+    
+    return "", ""
+
+
+def _extract_house_from_lines(lines: list[str]) -> str:
+    """
+    Extract house number from lines containing வீட்டு எண் or House No.
+    """
+    house_patterns = [
+        r"வீட்டு\s*எண்",
+        r"வீட்டுஎண்",
+        r"ட்டு\s*எண்",     # Sometimes OCR cuts off first char
+        r"house\s*(?:no|number)?",
+    ]
+    
+    combined_pattern = r"(?:" + "|".join(house_patterns) + r")"
+    
+    for line in lines:
+        norm = _normalize_line_for_matching(line)
+        
+        if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
+            # Extract what comes after the label
+            value = _extract_value_after_colon(line, combined_pattern)
+            
+            # House numbers are typically simple: digits, maybe with letters
+            # Clean out common garbage
+            value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", value, flags=re.IGNORECASE)
+            value = re.sub(r"\s+", "", value)  # Remove spaces
+            
+            # Extract just the house number pattern (digit-based, may have letters)
+            house_match = re.search(r"^(\d[\dA-Za-z/\-]{0,15})", value)
+            if house_match:
+                return house_match.group(1)
+            
+            # If value looks reasonable, return it
+            cleaned = re.sub(r"[^\dA-Za-z/\-]", "", value)
+            if cleaned and len(cleaned) <= 15:
+                return cleaned
+    
+    return ""
+
+
+def _extract_age_from_lines(lines: list[str]) -> str:
+    """Extract age from lines containing வயது or Age."""
+    age_patterns = [
+        r"வயது",
+        r"age",
+    ]
+    
+    combined_pattern = r"(?:" + "|".join(age_patterns) + r")"
+    
+    for line in lines:
+        norm = _normalize_line_for_matching(line)
+        
+        if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
+            # Age is on the same line, typically "வயது : 79 பாலினம் : ஆண்"
+            # Extract the number right after age label
+            age_match = re.search(
+                rf"(?:{combined_pattern})\s*[:\-–—]?\s*(\d{{1,3}})",
+                norm,
+                re.IGNORECASE | re.UNICODE
+            )
+            if age_match:
+                return age_match.group(1)
+    
+    return ""
+
+
+def _extract_gender_from_lines(lines: list[str]) -> str:
+    """Extract gender from lines containing பாலினம் or Gender."""
+    gender_patterns = [
+        r"பாலினம்",
+        r"gender",
+    ]
+    
+    combined_pattern = r"(?:" + "|".join(gender_patterns) + r")"
+    
+    # Gender value mappings
+    gender_map = {
+        "ஆண்": "Male",
+        "ஆண": "Male",
+        "male": "Male",
+        "m": "Male",
+        "பெண்": "Female",
+        "பெண": "Female",
+        "female": "Female",
+        "f": "Female",
+        "திருநங்கை": "Other",
+        "other": "Other",
+        "o": "Other",
+    }
+    
+    for line in lines:
+        norm = _normalize_line_for_matching(line)
+        
+        if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
+            # Gender value comes after the label
+            gender_match = re.search(
+                rf"(?:{combined_pattern})\s*[:\-–—]?\s*(\S+)",
+                norm,
+                re.IGNORECASE | re.UNICODE
+            )
+            if gender_match:
+                raw_gender = gender_match.group(1).strip()
+                # Map to standard value
+                for key, value in gender_map.items():
+                    if key.lower() in raw_gender.lower() or raw_gender.lower() in key.lower():
+                        return value
+                # If no mapping found but looks like gender, return as-is
+                if raw_gender and len(raw_gender) < 15:
+                    return raw_gender
+    
+    return ""
+
+
+# =====================================================================
+# ENHANCED ROI-BASED EXTRACTION (for Serial Number)
+# =====================================================================
+
+
+def _extract_serial_number_enhanced(image_path: Path) -> str:
+    """
+    Enhanced serial number extraction using multiple approaches:
+    1. Direct ROI with improved preprocessing
+    2. Contour-based digit detection
+    """
+    voter_bgr = cv2.imread(str(image_path))
+    if voter_bgr is None:
+        return ""
+    
+    h, w = voter_bgr.shape[:2]
+    
+    # Try multiple ROI regions - the serial box can vary slightly
+    rois_to_try = [
+        SERIAL_ROI,                           # Default
+        (0.12, 0.04, 0.35, 0.22),             # Slightly wider/taller
+        (0.15, 0.08, 0.32, 0.18),             # Slightly narrower
+        (0.10, 0.02, 0.40, 0.25),             # Much wider fallback
+    ]
+    
+    best_result = ""
+    
+    for roi in rois_to_try:
+        try:
+            serial_bgr = _crop_rel(voter_bgr, *roi)
+            
+            # Multiple preprocessing attempts
+            results = []
+            
+            # Method 1: Standard preprocessing
+            gray1 = cv2.cvtColor(serial_bgr, cv2.COLOR_BGR2GRAY)
+            gray1 = cv2.resize(gray1, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+            gray1 = cv2.GaussianBlur(gray1, (3, 3), 0)
+            _, thresh1 = cv2.threshold(gray1, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Method 2: Adaptive threshold
+            gray2 = cv2.cvtColor(serial_bgr, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.resize(gray2, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+            thresh2 = cv2.adaptiveThreshold(gray2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                           cv2.THRESH_BINARY, 31, 8)
+            
+            # Method 3: Inverted (for dark text on light bg)
+            gray3 = cv2.cvtColor(serial_bgr, cv2.COLOR_BGR2GRAY)
+            gray3 = cv2.resize(gray3, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+            gray3 = cv2.bitwise_not(gray3)
+            _, thresh3 = cv2.threshold(gray3, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            for preprocessed in [thresh1, thresh2, thresh3]:
+                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_DIGITS}"
+                txt = pytesseract.image_to_string(Image.fromarray(preprocessed), lang="eng", config=config)
+                digits = re.sub(r"[^0-9]", "", txt)
+                if digits:
+                    results.append(digits)
+            
+            # Pick the most reasonable result (1-4 digits for serial)
+            for r in results:
+                if 1 <= len(r) <= 4:
+                    if not best_result or len(r) > len(best_result):
+                        best_result = r.lstrip("0") or r
+                        
+        except Exception:
+            continue
+    
+    return best_result
+
+
+# =====================================================================
+# LEGACY FUNCTIONS (kept for backward compatibility)
+# =====================================================================
+
+
 # ---------------------- Label-based field extraction ---------------------
 
 def _same_line(a: WordBox, b: WordBox) -> bool:
@@ -749,9 +1098,10 @@ def _process_image(
     page_name: str = "",
 ) -> tuple[dict[str, Any], float]:
     """
-    Hybrid:
-    - EPIC via ROI
-    - Other fields via image_to_data (single-pass)
+    Hybrid extraction approach:
+    - EPIC via ROI (most accurate)
+    - Serial via enhanced ROI extraction
+    - All other fields via LINE-BASED extraction (new, more robust approach)
     Returns structured record.
     """
     start = time.time()
@@ -762,6 +1112,7 @@ def _process_image(
         except Exception:
             pass
 
+    # ==================== EPIC EXTRACTION (ROI) ====================
     epic_no = ""
     epic_valid = False
     try:
@@ -771,16 +1122,23 @@ def _process_image(
         epic_no = ""
         epic_valid = False
 
+    # ==================== SERIAL NUMBER EXTRACTION (Enhanced ROI) ====================
     serial_no = ""
     try:
-        serial_no = _extract_serial_from_image(image_path)
+        # Try enhanced extraction first
+        serial_no = _extract_serial_number_enhanced(image_path)
+        if not serial_no:
+            # Fallback to original method
+            serial_no = _extract_serial_from_image(image_path)
     except Exception:
         serial_no = ""
 
-    # single-pass OCR to word data (also used for raw OCR debug markdown)
+    # ==================== FULL OCR + LINE RECONSTRUCTION ====================
     try:
         tesseract_config = "--oem 1 --psm 6"
         ocr_data = _ocr_data_dict(image_path, languages, config=tesseract_config)
+        
+        # Raw OCR dump for debugging (if enabled)
         if raw_ocr_md_path is not None:
             append_raw_ocr_text_only(
                 md_path=raw_ocr_md_path,
@@ -802,38 +1160,72 @@ def _process_image(
                 tesseract_config=tesseract_config,
                 ocr_data=ocr_data,
             )
+        
+        # Reconstruct full lines for line-based extraction
+        lines = _reconstruct_lines_from_ocr_data(ocr_data)
+        
+        # Keep word boxes for fallback (legacy method)
         words = _words_from_ocr_data(ocr_data, filter_low_conf=True)
+        
     except Exception as e:
+        lines = []
         words = []
         elapsed = time.time() - start
         return {
             "image": image_path.name,
+            "serial_no": serial_no,
             "epic_no": epic_no,
             "epic_valid": epic_valid,
-            "error": f"image_to_data failed: {e}",
+            "error": f"OCR failed: {e}",
         }, elapsed
 
-    # Extract fields from labels
-    name_val = _extract_value_after_label(words, NAME_LABELS, allow_next_line=allow_next_line, max_chars=80)
-
-    rel_type, rel_name = _extract_relation(words, allow_next_line=allow_next_line)
-
-    # House: label-based first, ROI fallback second
-    house_raw = _extract_value_after_label(words, HOUSE_LABELS, allow_next_line=allow_next_line, max_chars=80)
-    house_val = _clean_house_value(house_raw)
-
+    # ==================== LINE-BASED FIELD EXTRACTION (NEW) ====================
+    
+    # NAME: Extract from name line (not relation lines)
+    name_val = _extract_name_from_lines(lines)
+    
+    # Fallback to old method if line-based fails
+    if not name_val:
+        name_val = _extract_value_after_label(words, NAME_LABELS, allow_next_line=allow_next_line, max_chars=80)
+    
+    # RELATION: Extract type and name
+    rel_type, rel_name = _extract_relation_from_lines(lines)
+    
+    # Fallback to old method
+    if not rel_name:
+        rel_type, rel_name = _extract_relation(words, allow_next_line=allow_next_line)
+    
+    # HOUSE NUMBER: Extract from house line
+    house_val = _extract_house_from_lines(lines)
+    
+    # Fallback chain for house
+    if not house_val:
+        house_raw = _extract_value_after_label(words, HOUSE_LABELS, allow_next_line=allow_next_line, max_chars=80)
+        house_val = _clean_house_value(house_raw)
+    
     if not house_val:
         house_val = _extract_house_from_roi(image_path)
+    
+    # AGE: Extract from age line
+    age_val = _extract_age_from_lines(lines)
+    
+    # Fallback to old method
+    if not age_val:
+        age_val = _extract_value_after_label(words, AGE_LABELS, allow_next_line=allow_next_line, max_chars=6)
+        age_val = _clean_age_value(age_val)
+    
+    # GENDER: Extract from gender line
+    gender_val = _extract_gender_from_lines(lines)
+    
+    # Fallback to old method  
+    if not gender_val:
+        gender_val = _extract_value_after_label(words, GENDER_LABELS, allow_next_line=allow_next_line, max_chars=12)
+        gender_val = _map_gender_value(gender_val)
 
-    age_val = _extract_value_after_label(words, AGE_LABELS, allow_next_line=allow_next_line, max_chars=6)
-    age_val = _clean_age_value(age_val)
-
-    gender_val = _extract_value_after_label(words, GENDER_LABELS, allow_next_line=allow_next_line, max_chars=12)
-    gender_val = _map_gender_value(gender_val)
-
-    # Final safety cleanup:
+    # ==================== FINAL CLEANUP ====================
     rel_name = _strip_leading_name_label(rel_name)
 
+    # Safety: reject if photo markers detected in relation name
     if rel_name and any(_norm_for_match(m) in _norm_for_match(rel_name) for m in PHOTO_MARKERS):
         rel_name = ""
         rel_type = ""

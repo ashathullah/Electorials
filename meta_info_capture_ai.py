@@ -66,11 +66,56 @@ from openai import OpenAI
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 
+def _safe_float_env(key: str) -> Optional[float]:
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        raise ValueError(f"Invalid float for env var {key}={raw!r}")
+
+
+def _get_pricing_from_env() -> dict[str, Any]:
+    """Return configured pricing, if present.
+
+    Pricing is expected as USD per 1M tokens.
+    """
+    input_per_1m = _safe_float_env("AI_INPUT_COST_PER_1M_USD")
+    output_per_1m = _safe_float_env("AI_OUTPUT_COST_PER_1M_USD")
+    currency = (os.getenv("AI_COST_CURRENCY") or "USD").strip().upper() or "USD"
+    return {
+        "currency": currency,
+        "input_cost_per_1m_tokens": input_per_1m,
+        "output_cost_per_1m_tokens": output_per_1m,
+    }
+
+
+def _estimate_cost_usd(*, pricing: dict[str, Any], usage: Optional[dict[str, int]]) -> Optional[float]:
+    if not usage:
+        return None
+    in_cost = pricing.get("input_cost_per_1m_tokens")
+    out_cost = pricing.get("output_cost_per_1m_tokens")
+    if in_cost is None and out_cost is None:
+        return None
+
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+
+    total = 0.0
+    if in_cost is not None:
+        total += (prompt_tokens / 1_000_000.0) * float(in_cost)
+    if out_cost is not None:
+        total += (completion_tokens / 1_000_000.0) * float(out_cost)
+    return total
+
+
 def _load_dotenv(dotenv_path: Path) -> None:
     """Minimal .env loader (no external dependency).
 
     Supports KEY=VALUE, ignores blank lines and comments (#).
-    Does not override existing environment variables.
+    Does not override existing environment variables (except it will replace
+    empty-string values, which commonly happen in shells).
     """
     if not dotenv_path.exists() or not dotenv_path.is_file():
         return
@@ -86,7 +131,7 @@ def _load_dotenv(dotenv_path: Path) -> None:
         value = value.strip().strip('"').strip("'")
         if not key:
             continue
-        if os.getenv(key) is None:
+        if os.getenv(key) in (None, ""):
             os.environ[key] = value
 
 
@@ -322,7 +367,7 @@ def _normalize_openai_sdk_base_url(base_url: str) -> str:
 
 
 def _call_openai_compatible_vision(*, prompt_text: str, front_image: Path, back_image: Path) -> str:
-    api_key = os.getenv("AI_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("Missing AI_API_KEY / AI_API_KEY / OPENAI_API_KEY environment variable")
 
@@ -368,11 +413,41 @@ def _call_openai_compatible_vision(*, prompt_text: str, front_image: Path, back_
         payload["response_format"] = {"type": "json_object"}
 
     resp = client.chat.completions.create(**payload)
-    # OpenAI-compatible shape
+
+    # Extract content
     try:
-        return str(resp.choices[0].message.content)
+        content = str(resp.choices[0].message.content)
     except Exception as e:
         raise RuntimeError(f"Unexpected response shape from AI SDK: {e}")
+
+    # Extract usage (if available)
+    usage: Optional[dict[str, int]] = None
+    try:
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            usage = {
+                "prompt_tokens": int(getattr(u, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(u, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(u, "total_tokens", 0) or 0),
+            }
+    except Exception:
+        usage = None
+
+    pricing = _get_pricing_from_env()
+    estimated_cost_usd = _estimate_cost_usd(pricing=pricing, usage=usage)
+
+    ai_meta: dict[str, Any] = {
+        "provider": provider or None,
+        "base_url": base_url,
+        "model": model,
+        "pricing": pricing,
+        "usage": usage,
+        "estimated_cost": {"currency": pricing.get("currency") or "USD", "value": estimated_cost_usd}
+        if estimated_cost_usd is not None
+        else None,
+    }
+
+    return content, ai_meta
 
 
 def main() -> int:
@@ -455,14 +530,26 @@ def main() -> int:
             continue
 
         content: Optional[str] = None
+        ai_meta: Optional[dict[str, Any]] = None
         try:
-            content = _call_openai_compatible_vision(
+            content, ai_meta = _call_openai_compatible_vision(
                 prompt_text=prompt_text,
                 front_image=front,
                 back_image=back,
             )
 
             obj = _extract_first_json_object(content)
+            if isinstance(obj, dict):
+                obj.setdefault("ai_metadata", {})
+                # Never overwrite if prompt/model already emitted the key.
+                if not obj["ai_metadata"] and ai_meta is not None:
+                    obj["ai_metadata"] = ai_meta
+            else:
+                obj = {
+                    "data": obj,
+                    "ai_metadata": ai_meta,
+                }
+
             out_path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
             ok += 1
             print(f"OK: {file_name} -> {out_path.name} (front={front.name}, back={back.name})")

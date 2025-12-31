@@ -20,3 +20,7 @@ so --limit was for file now we have two layer we need add one more flag to limit
 3. for each page processed the results should be stored in /extracted/<file_name>/output/page_wise/<page_name>.json and the result for the whole file should be in /extracted/<file_name>/output/<file_name>.json
 
 4. I need to know how long it takes to process each image, each page, each file similar to how we implemented in ocr processing.
+
+
+This project is about gathering information about voters From Pdfs.
+Right now all the files are acting separately where I need to Execute Each and every one of them separately To achieve the whole process Now lets organise this code

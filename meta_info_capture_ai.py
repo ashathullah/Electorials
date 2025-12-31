@@ -1,4 +1,4 @@
-"""send_front_back_to_ai.py
+"""meta_info_capture_ai.py
 
 Batch-extract metadata from Indian Electoral Roll PDFs by sending the FIRST and LAST
 (relevant) page images of each extracted folder to a multimodal AI model.
@@ -7,7 +7,7 @@ Input folders:
   extracted/<file_name>/images/*.(png|jpg|jpeg|tif|tiff|bmp|webp)
 
 Output:
-  extracted/<file_name>/output/<file_name>.json
+  extracted/<file_name>/output/<file_name>-metadata.json
 
 Back-page selection:
   Sometimes the very last image is blank or lacks the "SUMMARY OF ELECTORS" table.
@@ -32,15 +32,15 @@ Install deps:
   pip install opencv-python numpy requests
 
 Usage:
-  python send_front_back_to_ai.py
-  python send_front_back_to_ai.py --limit 5
-  python send_front_back_to_ai.py --force
-  python send_front_back_to_ai.py --prompt prompt.md
+  python meta_info_capture_ai.py
+  python meta_info_capture_ai.py --limit 5
+  python meta_info_capture_ai.py --force
+  python meta_info_capture_ai.py --prompt prompt.md
 
 Gemini quickstart:
     1) Copy .env.example -> .env
     2) Set AI_PROVIDER=gemini, AI_API_KEY=..., AI_MODEL=gemini-2.5-flash
-    3) Run: python send_front_back_to_ai.py
+    3) Run: python meta_info_capture_ai.py
 
 Notes:
   - The prompt should instruct the model to output JSON only.
@@ -421,7 +421,7 @@ def main() -> int:
         file_name = folder.name
         images_dir = folder / "images"
         out_dir = folder / "output"
-        out_path = out_dir / f"{file_name}.json"
+        out_path = out_dir / f"{file_name}-metadata.json"
 
         if out_path.exists() and not args.force:
             print(f"SKIP (exists): {out_path}")

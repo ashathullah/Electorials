@@ -44,6 +44,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from markdown_preview import write_file_markdown, write_page_markdown
+from raw_ocr_dump import append_raw_ocr_text_only, init_raw_ocr_markdown, write_raw_ocr_detailed_for_image
+
 try:
     import pytesseract
     from pytesseract import Output
@@ -60,11 +63,17 @@ except ImportError:
 
 # EPIC ROI ratios (x1, y1, x2, y2) relative to crop size
 # epic is top-right
-EPIC_ROI = (0.55, 0.05, 0.98, 0.18)
+# EPIC_ROI = (0.55, 0.05, 0.98, 0.18)
+EPIC_ROI = (0.65, 0.05, 0.98, 0.20)
+
+# Serial number ROI ratios (x1, y1, x2, y2) relative to crop size
+# serial is in top-left boxed area (includes the small number box to the right)
+# SERIAL_ROI = (0.005, 0.01, 0.35, 0.20)
+SERIAL_ROI = (0.15, 0.06, 0.329, 0.2)
 
 # House line is below relation line and above age/gender
 # HOUSE_ROI = (0.05, 0.38, 0.78, 0.58)
-HOUSE_ROI = (0.05, 0.42, 0.78, 0.56)
+HOUSE_ROI = (0.02, 0.42, 0.40, 0.54)
 
 # Label variants (English/Tamil). We match by "contains" after normalization.
 NAME_LABELS = [
@@ -107,7 +116,7 @@ STOP_LABELS = [
 # We'll match multi-token spans in _extract_value_after_label(), so keep full phrases prioritized.
 HOUSE_LABELS = [
     "house no", "house number", "house",         # English
-    "வீட்டு எண்", "வீட்டு எண்‌", "வீடு",         # Tamil
+    "வீட்டு எண்", "வீட்டு எண்‌", "வீடு", "ட்டு எண்", "வீட்டுஎண்"        # Tamil
 ]
 
 AGE_LABELS = ["age", "வயது", "வயது‌"]
@@ -120,6 +129,11 @@ LABEL_SEPARATORS = {":", "-", "—", "|", "=", "№"}
 WL_EPIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 WL_DIGITS = "0123456789"
 WL_HOUSE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"
+
+
+# Enable to save ROI overlays for quick coordinate debugging.
+# Prefer enabling via CLI: --debug-rois 1
+DEBUG_DRAW_ROIS = False
 
 
 # ------------------------------ Data types ------------------------------
@@ -281,8 +295,52 @@ def _normalize_for_epic(bgr):
     return gray
 
 
+def _normalize_for_serial(bgr):
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        8,
+    )
+    # If digits are light on dark, invert (heuristic)
+    if float(np.mean(gray)) > 180:
+        gray = 255 - gray
+    return gray
+
+
+def _debug_draw_rois(image_path: Path, out_dir: Path) -> None:
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        return
+    h, w = bgr.shape[:2]
+
+    def rect(roi: tuple[float, float, float, float], color: tuple[int, int, int]) -> None:
+        x1, y1, x2, y2 = roi
+        X1, Y1 = int(x1 * w), int(y1 * h)
+        X2, Y2 = int(x2 * w), int(y2 * h)
+        cv2.rectangle(bgr, (X1, Y1), (X2, Y2), color, 2)
+
+    rect(EPIC_ROI, (0, 255, 0))
+    rect(SERIAL_ROI, (255, 0, 0))
+    rect(HOUSE_ROI, (0, 0, 255))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_dir / f"debug_{image_path.name}"), bgr)
+
+
 def _ocr_epic(gray) -> str:
     config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_EPIC}"
+    txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+    return " ".join(txt.strip().split())
+
+
+def _ocr_serial(gray) -> str:
+    config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_DIGITS}"
     txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
     return " ".join(txt.strip().split())
 
@@ -307,6 +365,22 @@ def _extract_epic_from_image(image_path: Path) -> str:
     epic_gray = _normalize_for_epic(epic_bgr)
     epic_raw = _ocr_epic(epic_gray)
     return _clean_epic(epic_raw)
+
+
+def _extract_serial_from_image(image_path: Path) -> str:
+    voter_bgr = cv2.imread(str(image_path))
+    if voter_bgr is None:
+        return ""
+    serial_bgr = _crop_rel(voter_bgr, *SERIAL_ROI)
+    serial_gray = _normalize_for_serial(serial_bgr)
+    raw = _ocr_serial(serial_gray)
+    digits = re.sub(r"[^0-9]", "", raw)
+    if not digits:
+        return ""
+    # serial should be small (1-3 digits) in most rolls
+    if len(digits) > 4:
+        digits = digits[-4:]
+    return digits.lstrip("0") or digits
 
 
 
@@ -335,9 +409,54 @@ def _ocr_words(image_path: Path, languages: str) -> list[WordBox]:
         except Exception:
             conf = -1
 
-        # You can raise this if you want more strictness (at risk of missing)
+        # Confidence for non-Latin scripts (Tamil) is often reported low; keep Tamil tokens
+        # so label matching still works.
         if conf != -1 and conf < 20:
+            if not re.search(r"[\u0B80-\u0BFF]", txt):
+                continue
+
+        out.append(
+            WordBox(
+                text=txt,
+                x=int(data["left"][i]),
+                y=int(data["top"][i]),
+                w=int(data["width"][i]),
+                h=int(data["height"][i]),
+                conf=conf,
+                line_num=int(data.get("line_num", [0] * n)[i]),
+                block_num=int(data.get("block_num", [0] * n)[i]),
+                par_num=int(data.get("par_num", [0] * n)[i]),
+            )
+        )
+    return out
+
+
+def _ocr_data_dict(image_path: Path, languages: str, config: str = "--oem 1 --psm 6") -> dict[str, Any]:
+    img = Image.open(image_path)
+    try:
+        return pytesseract.image_to_data(img, lang=languages, config=config, output_type=Output.DICT)
+    finally:
+        img.close()
+
+
+def _words_from_ocr_data(data: dict[str, Any], *, filter_low_conf: bool = True) -> list[WordBox]:
+    n = len(data.get("text", []))
+    out: list[WordBox] = []
+    for i in range(n):
+        txt = (data["text"][i] or "").strip()
+        if not txt:
             continue
+        try:
+            conf = int(float(data["conf"][i]))
+        except Exception:
+            conf = -1
+
+        if filter_low_conf:
+            # Confidence for non-Latin scripts (Tamil) is often reported low; keep Tamil tokens
+            # so label matching still works.
+            if conf != -1 and conf < 20:
+                if not re.search(r"[\u0B80-\u0BFF]", txt):
+                    continue
 
         out.append(
             WordBox(
@@ -454,20 +573,35 @@ def _extract_value_after_label(
         return ""
 
     # start AFTER the last token in the label span (e.g., after "Number")
-    value = _join_value_words(lw, start_x=label_end.x2 + 5, max_chars=max_chars)
+    value = _join_value_words(lw, start_x=max(0, label_end.x2 - 5), max_chars=max_chars)
     if value:
         return value
 
     if not allow_next_line:
         return ""
 
-    target = (label_start.block_num, label_start.par_num, label_start.line_num + 1)
-    next_line = sorted([w for w in words if _line_key(w) == target], key=lambda w: w.x)
+    next_line = _get_next_visual_line(words, label_start)
 
     if _looks_like_photo_line(next_line):
         return ""
 
     return _join_value_words(next_line, start_x=0, max_chars=max_chars)
+
+
+def _get_next_visual_line(words: list[WordBox], label: WordBox, max_dy: int = 60) -> list[WordBox]:
+    # Find the closest visual line below the label using y proximity.
+    label_cutoff_y = label.y + int(label.h * 0.6)
+    below = [
+        w
+        for w in words
+        if (w.y > label_cutoff_y) and (w.y <= label_cutoff_y + max_dy)
+    ]
+    if not below:
+        return []
+
+    min_y = min(w.y for w in below)
+    line = [w for w in below if abs(w.y - min_y) <= 10]
+    return sorted(line, key=lambda w: w.x)
 
 
 
@@ -558,13 +692,9 @@ def _clean_house_value(s: str) -> str:
             candidates.append(t)
 
     if candidates:
-        candidates.sort(key=len, reverse=True)
+        # Prefer tokens with more digits, then longer tokens
+        candidates.sort(key=lambda t: (sum(ch.isdigit() for ch in t), len(t)), reverse=True)
         return candidates[0]
-
-    # fallback: pick any short digit token that doesn't contain bad substrings
-    for t in tokens:
-        if re.search(r"\d", t) and len(t) <= 12 and not any(b in t for b in HOUSE_BAD_SUBSTRINGS):
-            return t
 
     return ""
 
@@ -609,7 +739,15 @@ def _map_gender_value(s: str) -> str:
 
 # ---------------------------- Per-image OCR -----------------------------
 
-def _process_image(image_path: Path, languages: str, allow_next_line: bool) -> tuple[dict[str, Any], float]:
+def _process_image(
+    image_path: Path,
+    languages: str,
+    allow_next_line: bool,
+    raw_ocr_md_path: Optional[Path] = None,
+    raw_ocr_detail_out_dir: Optional[Path] = None,
+    file_name: str = "",
+    page_name: str = "",
+) -> tuple[dict[str, Any], float]:
     """
     Hybrid:
     - EPIC via ROI
@@ -617,6 +755,12 @@ def _process_image(image_path: Path, languages: str, allow_next_line: bool) -> t
     Returns structured record.
     """
     start = time.time()
+
+    if DEBUG_DRAW_ROIS:
+        try:
+            _debug_draw_rois(image_path, image_path.parent / "_debug_rois")
+        except Exception:
+            pass
 
     epic_no = ""
     epic_valid = False
@@ -627,9 +771,38 @@ def _process_image(image_path: Path, languages: str, allow_next_line: bool) -> t
         epic_no = ""
         epic_valid = False
 
-    # single-pass OCR to words
+    serial_no = ""
     try:
-        words = _ocr_words(image_path, languages)
+        serial_no = _extract_serial_from_image(image_path)
+    except Exception:
+        serial_no = ""
+
+    # single-pass OCR to word data (also used for raw OCR debug markdown)
+    try:
+        tesseract_config = "--oem 1 --psm 6"
+        ocr_data = _ocr_data_dict(image_path, languages, config=tesseract_config)
+        if raw_ocr_md_path is not None:
+            append_raw_ocr_text_only(
+                md_path=raw_ocr_md_path,
+                file=file_name,
+                page=page_name,
+                image=image_path.name,
+                languages=languages,
+                tesseract_config=tesseract_config,
+                ocr_data=ocr_data,
+            )
+        if raw_ocr_detail_out_dir is not None:
+            detail_md_path = raw_ocr_detail_out_dir / f"{image_path.stem}.md"
+            write_raw_ocr_detailed_for_image(
+                out_path=detail_md_path,
+                file=file_name,
+                page=page_name,
+                image=image_path.name,
+                languages=languages,
+                tesseract_config=tesseract_config,
+                ocr_data=ocr_data,
+            )
+        words = _words_from_ocr_data(ocr_data, filter_low_conf=True)
     except Exception as e:
         words = []
         elapsed = time.time() - start
@@ -668,6 +841,7 @@ def _process_image(image_path: Path, languages: str, allow_next_line: bool) -> t
     elapsed = time.time() - start
     return {
         "image": image_path.name,
+        "serial_no": serial_no,
         "epic_no": epic_no,
         "epic_valid": epic_valid,
 
@@ -689,6 +863,8 @@ def _process_page(
     page_dir: Path,
     languages: str,
     allow_next_line: bool,
+    raw_ocr_md_path: Optional[Path] = None,
+    raw_ocr_detail_root: Optional[Path] = None,
 ) -> dict[str, Any]:
     page_name = page_dir.name
     images_dir = _resolve_page_images_dir(page_dir)
@@ -706,8 +882,25 @@ def _process_page(
     records: list[dict[str, Any]] = []
     image_times: list[float] = []
 
+    output_dir = file_folder / "output"
+    page_wise_dir = output_dir / "page_wise"
+    page_wise_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_ocr_detail_out_dir: Optional[Path] = None
+    if raw_ocr_detail_root is not None:
+        raw_ocr_detail_out_dir = raw_ocr_detail_root / page_name
+        raw_ocr_detail_out_dir.mkdir(parents=True, exist_ok=True)
+
     for idx, image_path in enumerate(images, start=1):
-        rec, t = _process_image(image_path, languages, allow_next_line)
+        rec, t = _process_image(
+            image_path,
+            languages,
+            allow_next_line,
+            raw_ocr_md_path=raw_ocr_md_path,
+            raw_ocr_detail_out_dir=raw_ocr_detail_out_dir,
+            file_name=file_folder.name,
+            page_name=page_name,
+        )
         records.append(rec)
         image_times.append(t)
         print(f"      [{idx}/{len(images)}] {image_path.name} [EPIC+DATA] - {t:.2f}s")
@@ -715,10 +908,8 @@ def _process_page(
     page_elapsed = time.time() - page_start
     avg_image = (sum(image_times) / len(image_times)) if image_times else 0.0
 
-    output_dir = file_folder / "output"
-    page_wise_dir = output_dir / "page_wise"
-    page_wise_dir.mkdir(parents=True, exist_ok=True)
     page_output_path = page_wise_dir / f"{page_name}.json"
+    page_md_path = page_wise_dir / f"{page_name}.md"
 
     payload = {
         "file": file_folder.name,
@@ -728,6 +919,7 @@ def _process_page(
         "languages": languages,
         "allow_next_line": allow_next_line,
         "epic_roi": {"x1": EPIC_ROI[0], "y1": EPIC_ROI[1], "x2": EPIC_ROI[2], "y2": EPIC_ROI[3]},
+        "serial_roi": {"x1": SERIAL_ROI[0], "y1": SERIAL_ROI[1], "x2": SERIAL_ROI[2], "y2": SERIAL_ROI[3]},
         "timing": {
             "page_total_seconds": round(page_elapsed, 4),
             "avg_seconds_per_image": round(avg_image, 4),
@@ -735,6 +927,9 @@ def _process_page(
         },
         "records": records,
     }
+
+    write_page_markdown(page_md_path, payload)
+    print(f"    [SUCCESS] Saved page Markdown: {page_md_path.name}")
 
     page_output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"    [SUCCESS] Saved page JSON: {page_output_path.name}")
@@ -755,12 +950,18 @@ def _process_file_folder(
     languages: str,
     allow_next_line: bool,
     limit_pages: int,
+    only_page: str,
+    dump_raw_ocr_md: bool,
 ) -> dict[str, Any]:
     folder_name = folder.name
     crops_dir = folder / "crops"
     print(f"\nProcessing file: {folder_name}")
 
     pages = _get_sorted_page_dirs(crops_dir)
+
+    if only_page:
+        pages = [p for p in pages if p.name == only_page]
+
     if limit_pages and limit_pages > 0:
         pages = pages[:limit_pages]
 
@@ -771,20 +972,43 @@ def _process_file_folder(
     print(f"  Found {len(pages)} page(s)")
     file_start = time.time()
 
+    output_dir = folder / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_ocr_md_path: Optional[Path] = None
+    raw_ocr_detail_root: Optional[Path] = None
+    if dump_raw_ocr_md:
+        raw_ocr_md_path = output_dir / "raw_ocr.md"
+        raw_ocr_detail_root = output_dir / "raw_ocr"
+        init_raw_ocr_markdown(
+            raw_ocr_md_path,
+            file=folder_name,
+            languages=languages,
+            tesseract_config="--oem 1 --psm 6",
+        )
+        print(f"  [INFO] Raw OCR text dump enabled: {raw_ocr_md_path.name}")
+        print("  [INFO] Raw OCR detailed dump enabled: output/raw_ocr/<page>/<image>.md")
+
     page_summaries: list[dict[str, Any]] = []
     total_images = 0
 
     for idx, page_dir in enumerate(pages, start=1):
         print(f"  [PAGE {idx}/{len(pages)}] {page_dir.name}")
-        page_summary = _process_page(folder, page_dir, languages, allow_next_line)
+        page_summary = _process_page(
+            folder,
+            page_dir,
+            languages,
+            allow_next_line,
+            raw_ocr_md_path=raw_ocr_md_path,
+            raw_ocr_detail_root=raw_ocr_detail_root,
+        )
         page_summaries.append(page_summary)
         total_images += int(page_summary.get("images_processed", 0) or 0)
 
     file_elapsed = time.time() - file_start
 
-    output_dir = folder / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
     file_output_path = output_dir / f"{folder_name}.json"
+    file_md_path = output_dir / f"{folder_name}.md"
 
     file_payload = {
         "folder": folder_name,
@@ -811,6 +1035,9 @@ def _process_file_folder(
             if int(p.get("images_processed", 0) or 0) > 0
         ],
     }
+
+    write_file_markdown(file_md_path, file_payload)
+    print(f"  [SUCCESS] Saved file Markdown: {file_md_path.name}")
 
     file_output_path.write_text(json.dumps(file_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -843,10 +1070,24 @@ def main() -> int:
                         help="Process only first N files/folders under extracted (0 = all).")
     parser.add_argument("--limit-pages", type=int, default=0,
                         help="Process only first N pages per file (0 = all).")
+    parser.add_argument("--only-folder", type=str, default="",
+                        help="Process only a specific folder under extracted (exact name match).")
+    parser.add_argument("--only-page", type=str, default="",
+                        help="Process only a specific page folder under crops (e.g., page-004).")
     parser.add_argument("--allow-next-line", type=int, default=1,
                         help="If 1, when value isn't on same line as label, try next line in same block/par.")
+    parser.add_argument(
+        "--dump-raw-ocr-md",
+        action="store_true",
+        help="Write raw OCR text-only dump (single file) to extracted/<file>/output/raw_ocr.md",
+    )
+    parser.add_argument("--debug-rois", type=int, default=0,
+                        help="If 1, saves ROI overlay images to a _debug_rois folder near each input image.")
 
     args = parser.parse_args()
+
+    global DEBUG_DRAW_ROIS
+    DEBUG_DRAW_ROIS = bool(args.debug_rois)
 
     extracted_dir: Path = args.extracted
     allow_next_line = bool(args.allow_next_line)
@@ -856,6 +1097,10 @@ def main() -> int:
         return 1
 
     folders = _get_extracted_folders(extracted_dir)
+
+    if args.only_folder:
+        folders = [f for f in folders if f.name == args.only_folder]
+
     if args.limit and args.limit > 0:
         folders = folders[:args.limit]
 
@@ -866,6 +1111,12 @@ def main() -> int:
     print(f"Found {len(folders)} folder(s) to process")
     print(f"Languages: {args.languages}")
     print(f"Allow next line: {allow_next_line}")
+    if args.dump_raw_ocr_md:
+        print("Raw OCR Markdown: enabled")
+    if args.only_folder:
+        print(f"Only folder: {args.only_folder}")
+    if args.only_page:
+        print(f"Only page: {args.only_page}")
     if args.limit_pages and args.limit_pages > 0:
         print(f"Limit pages per file: {args.limit_pages}")
 
@@ -878,7 +1129,16 @@ def main() -> int:
     results = []
     total_start = time.time()
     for folder in folders:
-        results.append(_process_file_folder(folder, args.languages, allow_next_line, args.limit_pages))
+        results.append(
+            _process_file_folder(
+                folder,
+                args.languages,
+                allow_next_line,
+                args.limit_pages,
+                args.only_page,
+                dump_raw_ocr_md=bool(args.dump_raw_ocr_md),
+            )
+        )
     total_elapsed = time.time() - total_start
 
     print("\n" + "=" * 60)

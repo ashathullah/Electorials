@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Tuple
@@ -121,13 +122,16 @@ class MetadataExtractor(BaseProcessor):
         # Load prompt
         prompt_text = self.prompt_path.read_text(encoding="utf-8")
         
-        # Call AI
+        # Call AI with timing
+        start_time = time.time()
         try:
             content, ai_meta = self._call_ai(
                 prompt_text=prompt_text,
                 front_image=front_page,
                 back_image=back_page,
             )
+            extraction_time_sec = time.time() - start_time
+            ai_meta["extraction_time_sec"] = round(extraction_time_sec, 2)
         except Exception as e:
             self.log_error("AI call failed", error=e)
             self._save_error(str(e), front_page, back_page, None)
@@ -141,9 +145,10 @@ class MetadataExtractor(BaseProcessor):
             self._save_error(str(e), front_page, back_page, content)
             return False
         
-        # Add AI metadata
+        # IMPORTANT: Always overwrite ai_metadata field from AI response
+        # The AI might return an ai_metadata field in its JSON, but we need our tracked data
         if isinstance(parsed, dict):
-            parsed["ai_metadata"] = ai_meta
+            parsed["ai_metadata"] = self._flatten_ai_metadata(ai_meta)
         
         # Update context AI usage
         if ai_meta.get("usage"):
@@ -156,7 +161,7 @@ class MetadataExtractor(BaseProcessor):
             self.context.ai_usage.add_call(
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
-                cost_usd=ai_meta.get("estimated_cost", {}).get("value") if ai_meta.get("estimated_cost") else None,
+                cost_usd=ai_meta.get("estimated_cost"),
             )
         
         # Save output
@@ -374,26 +379,33 @@ class MetadataExtractor(BaseProcessor):
                     "completion_tokens": int(getattr(u, "completion_tokens", 0) or 0),
                     "total_tokens": int(getattr(u, "total_tokens", 0) or 0),
                 }
-        except Exception:
+                self.log_debug(
+                    "Usage extracted",
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    total_tokens=usage["total_tokens"]
+                )
+            else:
+                self.log_warning("No usage data in AI response")
+        except Exception as e:
+            self.log_warning(f"Failed to extract usage data: {e}")
             usage = None
         
         # Estimate cost
         estimated_cost = self._estimate_cost(usage, ai_config)
         
+        # Store full metadata (will be flattened later)
         ai_meta = {
-            "provider": ai_config.provider or None,
+            "provider": ai_config.provider or "",
+            "model": ai_config.model or "",
+            "usage": usage,
+            "estimated_cost": estimated_cost,
             "base_url": ai_config.base_url,
-            "model": ai_config.model,
             "pricing": {
                 "currency": ai_config.cost_currency,
                 "input_cost_per_1m_tokens": ai_config.input_cost_per_1m,
                 "output_cost_per_1m_tokens": ai_config.output_cost_per_1m,
             },
-            "usage": usage,
-            "estimated_cost": {
-                "currency": ai_config.cost_currency,
-                "value": estimated_cost
-            } if estimated_cost is not None else None,
         }
         
         return content, ai_meta
@@ -501,6 +513,19 @@ class MetadataExtractor(BaseProcessor):
                             break
         
         raise ValueError("Could not parse JSON from model response")
+    
+    def _flatten_ai_metadata(self, ai_meta: dict[str, Any]) -> dict[str, Any]:
+        """Flatten AI metadata to simplified structure."""
+        usage = ai_meta.get("usage") or {}
+        
+        return {
+            "provider": ai_meta.get("provider") or "",
+            "model": ai_meta.get("model") or "",
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "cost_usd": ai_meta.get("estimated_cost"),
+            "extraction_time_sec": ai_meta.get("extraction_time_sec", 0.0),
+        }
     
     def _save_error(
         self,

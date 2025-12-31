@@ -41,6 +41,9 @@ Examples:
     # Run only extraction step
     python main.py --step extract
 
+    # Run this to crop and OCR a specific extracted folder
+    python main.py --step crop
+
     # Run only OCR on already extracted folders
     python main.py --step ocr
 
@@ -406,6 +409,57 @@ def process_extracted_folder(
     return document
 
 
+def process_metadata_only(
+    folder: Path,
+    config: Config,
+    args: argparse.Namespace,
+) -> Optional[ProcessedDocument]:
+    """
+    Process metadata extraction only for an already-extracted folder.
+    
+    Args:
+        folder: Path to extracted folder
+        config: Configuration
+        args: Command line arguments
+    
+    Returns:
+        ProcessedDocument if successful, None otherwise
+    """
+    timer = Timer()
+    
+    logger.info(f"Processing: {folder.name}")
+    
+    # Create processing context
+    context = ProcessingContext(config=config)
+    context.setup_paths_from_extracted(folder)
+    
+    # Initialize persistence
+    store = JSONStore(config.extracted_dir)
+    
+    # Create document
+    document = ProcessedDocument(
+        id=context.pdf_name,
+        pdf_name=context.pdf_name,
+    )
+    
+    # Extract metadata using AI
+    logger.info("Step 2: Extracting metadata using AI...")
+    
+    metadata_extractor = MetadataExtractor(context, force=args.force)
+    if metadata_extractor.run() and metadata_extractor.result:
+        document.metadata = metadata_extractor.result
+        # NOTE: Do NOT call store.save_metadata here!
+        # The metadata_extractor already saved the file with AI usage data
+    else:
+        logger.warning(f"Metadata extraction failed for {folder.name}")
+    
+    # Finalize
+    document.status = "completed"
+    document.stats.total_time_seconds = timer.elapsed
+    
+    return document
+
+
 def main() -> int:
     """Main entry point."""
     args = parse_args()
@@ -429,8 +483,8 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "ocr"] and not args.paths:
-        # Process extracted folders
+    if args.step in ["crop", "ocr", "metadata"] and not args.paths:
+        # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         
         if args.folder:
@@ -446,7 +500,11 @@ def main() -> int:
         logger.info(f"Processing {len(folders)} extracted folder(s)")
         
         for folder in folders:
-            doc = process_extracted_folder(folder, config, args)
+            # For metadata step, use a special handler
+            if args.step == "metadata":
+                doc = process_metadata_only(folder, config, args)
+            else:
+                doc = process_extracted_folder(folder, config, args)
             if doc:
                 results.append(doc)
     

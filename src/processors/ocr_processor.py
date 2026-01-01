@@ -632,6 +632,39 @@ class OCRProcessor(BaseProcessor):
         s = re.sub(r"\s+", " ", s)
         return s
     
+    def _clean_extracted_value(self, value: str) -> str:
+        """Clean extracted value - remove leading colons, Tamil chars in English, etc."""
+        if not value:
+            return ""
+        
+        # Remove leading colons, dashes, and special chars
+        value = re.sub(r"^[:\-–—;,ஃ\s]+", "", value)
+        
+        # Remove trailing colons, dashes, and special chars
+        value = re.sub(r"[:\-–—;,ஃ\s]+$", "", value)
+        
+        # If the language context is English, remove Tamil characters
+        # Check if value is predominantly English (Latin chars)
+        has_english = len(re.findall(r'[A-Za-z]', value))
+        has_tamil = len(re.findall(r'[\u0B80-\u0BFF]', value))
+        
+        # If it has English letters and some Tamil mixed in, keep only English
+        if has_english > 0 and has_tamil > 0:
+            # Check ratio - if more English than Tamil, filter out Tamil
+            if has_english >= has_tamil:
+                value = re.sub(r'[\u0B80-\u0BFF]', '', value)
+                value = re.sub(r'\s+', ' ', value).strip()
+        
+        # If it's purely Tamil (no English), it might be a placeholder like இடன் (blank)
+        # These should be returned as empty
+        if has_tamil > 0 and has_english == 0:
+            # Check for common Tamil placeholder words
+            tamil_placeholders = ["இடன்", "நடது", "கடம்", "வெற்று"]
+            if any(p in value for p in tamil_placeholders):
+                return ""
+        
+        return value.strip()
+    
     def _extract_value_after_colon(self, line: str, label_pattern: str) -> str:
         """Extract value after label and separator."""
         norm_line = self._normalize_line(line)
@@ -657,7 +690,10 @@ class OCRProcessor(BaseProcessor):
                 words = line[8:].split("|")
                 name = self._extract_name_from_words(words)
                 if name:
-                    return name
+                    # Clean the extracted name
+                    name = self._clean_extracted_value(name)
+                    if name:
+                        return name
         
         # Patterns for name label - flexible to handle Tamil OCR variations
         name_patterns = [r"பெயர்", r"name\b"]
@@ -690,38 +726,101 @@ class OCRProcessor(BaseProcessor):
                         value = re.sub(r"\s*[-–—]\s*$", "", value)
                         # Clean pipe characters
                         value = value.replace("|", " ").strip()
+                        # Apply final cleaning
+                        value = self._clean_extracted_value(value)
                         if value and len(value) > 1:
                             return value
         
         return ""
     
     def _extract_name_from_words(self, words: List[str]) -> str:
-        """Extract name from raw word list - first பெயர் marker."""
-        # Pattern: பெயர்; பழனிவேல் or பெயர்: பழனிவேல்
-        # Find the FIRST பெயர் marker (not the one after relation type)
+        """Extract name from raw word list - first பெயர் or Name marker."""
+        # Pattern: பெயர்; பழனிவேல் or Name: John or name: John
+        # OCR output example: ['Name', ':', 'Rangaraj', 'Father', 'Name:', 'Makali', ...]
+        # Or: ['Name', ':Lakshmi', 'Husband', 'Name:', 'Rangaraj', ...]
+        # We want to get 'Rangaraj' or 'Lakshmi' (the first name after first 'Name' marker)
         
-        # Markers that indicate we've passed the first name
-        exclude_after = ["வீட்டு", "தந்தை", "தாய்", "கணவர்", "father", "mother", "husband"]
+        # Markers that indicate we've passed to relation section
+        relation_markers = ["father", "mother", "husband", "தந்தை", "தாய்", "கணவர்"]
+        skip_markers = ["வீட்டு", "house", "photo", "age", "gender", "எண்", "வயது", "பாலினம்"]
         
         for i, word in enumerate(words):
             word_clean = word.strip()
+            word_lower = word_clean.lower()
             
-            # Check if this is before any relation marker
-            preceding_text = " ".join(words[:i]).lower()
-            if any(ex in preceding_text for ex in exclude_after):
-                continue
+            # Check if this word contains பெயர் (Tamil name marker) or "name" (English marker)
+            is_tamil_name_marker = "பெயர்" in word_clean or "பெயர" in word_clean
+            is_english_name_marker = word_lower == "name" or word_lower == "name:" or word_lower.startswith("name:")
             
-            # Check if this word contains பெயர் (name marker)
-            if "பெயர்" in word_clean or "பெயர" in word_clean:
-                # Try to extract name from the next word
-                if i + 1 < len(words):
-                    next_word = words[i + 1].strip().rstrip(",;:ஃ%&")
-                    # Skip if next word is another field marker
-                    skip_markers = ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo", "தந்தை", "தாய்", "கணவர்", "-"]
-                    if next_word and not any(m in next_word for m in skip_markers):
-                        # Check if it looks like a Tamil name (contains Tamil characters)
-                        if re.search(r'[\u0B80-\u0BFF]', next_word):
-                            return next_word
+            if is_tamil_name_marker or is_english_name_marker:
+                # Look for the name value
+                # Skip colon if it's a separate token
+                name_start_idx = i + 1
+                if name_start_idx >= len(words):
+                    continue
+                    
+                next_word = words[name_start_idx].strip()
+                
+                # Handle case where colon is separate: ['Name', ':', 'John', 'Father', ...]
+                if next_word in [":", "-", ";", ","]:
+                    name_start_idx += 1
+                    if name_start_idx >= len(words):
+                        continue
+                    next_word = words[name_start_idx].strip()
+                
+                # Handle ":Lakshmi" case - name attached to colon
+                if next_word.startswith(":"):
+                    name_val = next_word.lstrip(":").strip()
+                    if name_val and not any(m in name_val.lower() for m in skip_markers + relation_markers):
+                        # This is the name! Clean and return
+                        name_val = re.sub(r'^[:\-–—;,ஃ\s]+', '', name_val)
+                        if name_val:
+                            return name_val.strip()
+                    name_start_idx += 1
+                    if name_start_idx >= len(words):
+                        continue
+                    next_word = words[name_start_idx].strip()
+                
+                # Check if next word is a relation marker - if so, skip this Name marker
+                # because this is "Father Name:" or "Husband Name:", not the person's name
+                next_word_lower = next_word.lower().rstrip(":,;")
+                if next_word_lower in relation_markers or any(rm in next_word_lower for rm in relation_markers):
+                    continue  # This is a relation prefix like "Husband" before "Name:"
+                
+                # Now check if the word at name_start_idx is valid
+                name_word = next_word.rstrip(",;:ஃ%&")
+                name_word = name_word.lstrip(":").strip()  # Remove leading colon
+                
+                # Skip if it's a marker or empty
+                if not name_word or any(m in name_word.lower() for m in skip_markers + relation_markers):
+                    continue
+                
+                # Check if it's a valid name (has letters)
+                has_english = re.search(r'[A-Za-z]', name_word)
+                has_tamil = re.search(r'[\u0B80-\u0BFF]', name_word)
+                
+                if has_english or has_tamil:
+                    # For English names, try to get full name (multiple words until we hit a marker)
+                    if has_english and not has_tamil:
+                        full_name = name_word
+                        for j in range(name_start_idx + 1, min(name_start_idx + 4, len(words))):
+                            extra_word = words[j].strip().rstrip(",;:ஃ%&")
+                            extra_lower = extra_word.lower()
+                            # Stop if we hit a marker
+                            if any(m in extra_lower for m in skip_markers + relation_markers):
+                                break
+                            if extra_word.startswith("-") or extra_word.startswith(":"):
+                                break
+                            if extra_word and re.match(r'^[A-Za-z]', extra_word):
+                                full_name += " " + extra_word
+                            else:
+                                break
+                        # Clean the name before returning
+                        full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
+                        return full_name.strip()
+                    # Tamil name
+                    name_word = re.sub(r'^[:\-–—;,ஃ\s]+', '', name_word)
+                    return name_word.strip()
         
         return ""
     
@@ -757,6 +856,8 @@ class OCRProcessor(BaseProcessor):
                         value = re.sub(r"\s*வயது.*$", "", value)
                         value = re.sub(r"\s*பாலினம்.*$", "", value)
                         value = value.strip()
+                        # Apply final cleaning to remove leading colons
+                        value = self._clean_extracted_value(value)
                         
                         if value and len(value) > 1:
                             return rel_type, value
@@ -764,28 +865,28 @@ class OCRProcessor(BaseProcessor):
         return "", ""
     
     def _extract_relation_from_words(self, words: List[str]) -> Tuple[str, str]:
-        """Extract relation from raw word list - more accurate for Tamil OCR output."""
-        # Pattern: ... கணவர் பெயர்; ராமசாமி ...
-        # or: ... தந்தையின் பெயர்; ராமசாமி ...
-        # or: ... - பெயர்; ராமசாமி ... (where - comes after relation type indicator)
+        """Extract relation from raw word list - handles both Tamil and English OCR output."""
+        # Pattern: ... கணவர் பெயர்; ராமசாமி ... (Tamil)
+        # or: ... Father's Name: John ... (English)
+        # or: ... father name: John ... (English)
         
         relation_type = ""
         relation_name = ""
         
-        # Find relation type markers
+        # Find relation type markers (Tamil and English)
         relation_markers = {
-            "father": ["தந்தை", "தந்தையின்"],
-            "mother": ["தாய்", "தாயின்"],
-            "husband": ["கணவர்", "கணவரின்"],
+            "father": ["தந்தை", "தந்தையின்", "father", "father's", "fathers"],
+            "mother": ["தாய்", "தாயின்", "mother", "mother's", "mothers"],
+            "husband": ["கணவர்", "கணவரின்", "husband", "husband's", "husbands"],
         }
         
         # First, find if there's a relation type in the words
         found_relation_idx = -1
         for i, word in enumerate(words):
-            word_clean = word.strip().rstrip(",;:ஃ%&")
+            word_clean = word.strip().rstrip(",;:ஃ%&").lower()
             for rel_type, markers in relation_markers.items():
                 for marker in markers:
-                    if marker in word_clean:
+                    if marker.lower() in word_clean or word_clean == marker.lower():
                         relation_type = rel_type
                         found_relation_idx = i
                         break
@@ -794,27 +895,94 @@ class OCRProcessor(BaseProcessor):
             if relation_type:
                 break
         
-        # If we found a relation type, look for the name after the next பெயர் marker
+        # Skip markers for both Tamil and English
+        skip_markers_tamil = ["வீட்டு", "எண்", "வயது", "பாலினம்"]
+        skip_markers_english = ["photo", "house", "age", "gender", "address", "no", "number"]
+        skip_markers = skip_markers_tamil + skip_markers_english
+        
+        # If we found a relation type, look for the name after the name marker
         if relation_type and found_relation_idx >= 0:
-            # Look for பெயர் after the relation marker
+            # Look for பெயர் or "name" after the relation marker
             for i in range(found_relation_idx + 1, len(words)):
                 word = words[i].strip()
-                if "பெயர்" in word or "பெயர" in word:
+                word_lower = word.lower()
+                is_tamil_name = "பெயர்" in word or "பெயர" in word
+                is_english_name = "name" in word_lower
+                
+                if is_tamil_name or is_english_name:
                     # The next word(s) should be the name
                     if i + 1 < len(words):
                         name_word = words[i + 1].strip().rstrip(",;:ஃ%&")
                         # Skip if it's another marker
-                        if name_word and not any(m in name_word for m in ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo"]):
-                            relation_name = name_word
+                        if name_word and not any(m.lower() in name_word.lower() for m in skip_markers):
+                            # For English names, try to get full name (multiple words)
+                            has_english = re.search(r'[A-Za-z]', name_word)
+                            has_tamil = re.search(r'[\u0B80-\u0BFF]', name_word)
+                            
+                            if has_english and not has_tamil:
+                                full_name = name_word
+                                for j in range(i + 2, min(i + 5, len(words))):
+                                    extra_word = words[j].strip().rstrip(",;:ஃ%&")
+                                    if any(m.lower() in extra_word.lower() for m in skip_markers):
+                                        break
+                                    if extra_word.startswith("-") or extra_word.startswith(":"):
+                                        break
+                                    if extra_word and re.match(r'^[A-Za-z]', extra_word):
+                                        full_name += " " + extra_word
+                                    else:
+                                        break
+                                # Clean leading colons from the name
+                                full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
+                                relation_name = full_name.strip()
+                            else:
+                                # Clean leading colons from Tamil name
+                                name_word = re.sub(r'^[:\-–—;,ஃ\s]+', '', name_word)
+                                relation_name = name_word.strip()
+                            break
+            
+            # If no name found after name marker, try direct value after relation type
+            if not relation_name and found_relation_idx + 1 < len(words):
+                # Check for pattern like "Father: John" or "Father's John"
+                for i in range(found_relation_idx + 1, min(found_relation_idx + 4, len(words))):
+                    word = words[i].strip().rstrip(",;:ஃ%&")
+                    word_lower = word.lower()
+                    # Skip "name" keyword and markers
+                    if word_lower in ["name", "name:", "'s"] or any(m.lower() in word_lower for m in skip_markers):
+                        continue
+                    # Check if it's a valid name (has letters, not a marker)
+                    if word and re.match(r'^[A-Za-z\u0B80-\u0BFF]', word):
+                        has_english = re.search(r'[A-Za-z]', word)
+                        has_tamil = re.search(r'[\u0B80-\u0BFF]', word)
+                        if has_english or has_tamil:
+                            if has_english and not has_tamil:
+                                full_name = word
+                                for j in range(i + 1, min(i + 4, len(words))):
+                                    extra_word = words[j].strip().rstrip(",;:ஃ%&")
+                                    if any(m.lower() in extra_word.lower() for m in skip_markers):
+                                        break
+                                    if extra_word.startswith("-") or extra_word.startswith(":"):
+                                        break
+                                    if extra_word and re.match(r'^[A-Za-z]', extra_word):
+                                        full_name += " " + extra_word
+                                    else:
+                                        break
+                                # Clean leading colons from the name
+                                full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
+                                relation_name = full_name.strip()
+                            else:
+                                # Clean leading colons from Tamil name
+                                word = re.sub(r'^[:\-–—;,ஃ\s]+', '', word)
+                                relation_name = word.strip()
                             break
         
-        # If no explicit relation type found, check if there's a second பெயர் pattern
+        # If no explicit relation type found, check if there's a second name pattern
         # (indicates relation name even without explicit type marker)
         if not relation_type:
             name_count = 0
             name_indices = []
             for i, word in enumerate(words):
-                if "பெயர்" in word or "பெயர" in word:
+                word_lower = word.lower()
+                if "பெயர்" in word or "பெயர" in word or word_lower.startswith("name"):
                     name_count += 1
                     name_indices.append(i)
             
@@ -823,10 +991,34 @@ class OCRProcessor(BaseProcessor):
                 second_name_idx = name_indices[1]
                 if second_name_idx + 1 < len(words):
                     name_word = words[second_name_idx + 1].strip().rstrip(",;:ஃ%&")
-                    if name_word and not any(m in name_word for m in ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo"]):
-                        relation_name = name_word
+                    if name_word and not any(m.lower() in name_word.lower() for m in skip_markers):
+                        # For English names, get full name
+                        has_english = re.search(r'[A-Za-z]', name_word)
+                        has_tamil = re.search(r'[\u0B80-\u0BFF]', name_word)
+                        
+                        if has_english and not has_tamil:
+                            full_name = name_word
+                            for j in range(second_name_idx + 2, min(second_name_idx + 5, len(words))):
+                                extra_word = words[j].strip().rstrip(",;:ஃ%&")
+                                if any(m.lower() in extra_word.lower() for m in skip_markers):
+                                    break
+                                if extra_word.startswith("-") or extra_word.startswith(":"):
+                                    break
+                                if extra_word and re.match(r'^[A-Za-z]', extra_word):
+                                    full_name += " " + extra_word
+                                else:
+                                    break
+                            relation_name = full_name.strip()
+                        else:
+                            relation_name = name_word
                         # Default to father if no type specified
                         relation_type = "father"
+        
+        # Clean the relation_name before returning
+        if relation_name:
+            # Remove leading colons, dashes, etc.
+            relation_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', relation_name)
+            relation_name = relation_name.strip()
         
         return relation_type, relation_name
     
@@ -1023,32 +1215,64 @@ class OCRProcessor(BaseProcessor):
     def _extract_age_from_words(self, words: List[str]) -> str:
         """Extract age from raw word list."""
         # Pattern: வயது,77 or வயது&77 or வயது:77 or வயது 77
+        # Also handles English: age:77, Age: 77, age 77
+        # OCR may output: Age இடன் 57 (with Tamil placeholder between Age and number)
+        
+        # Tamil placeholder words that may appear between Age and number
+        tamil_placeholders = ["இடன்", "கடம்", "நடது", "வெற்று"]
+        
         for i, word in enumerate(words):
             word_clean = word.strip()
+            word_lower = word_clean.lower()
             
-            # Check if this word contains வயது (age marker)
-            if "வயது" in word_clean:
-                # Try to extract age from the same word (e.g., வயது,77, வயது&77)
+            # Check if this word contains வயது (Tamil age marker) or "age" (English marker)
+            is_tamil_age = "வயது" in word_clean
+            is_english_age = word_lower.startswith("age") or word_lower == "age" or word_lower == "age:"
+            
+            if is_tamil_age or is_english_age:
+                # Try to extract age from the same word (e.g., வயது,77, வயது&77, age:77)
                 # Handle various separators: , & ; : - and Tamil special chars
-                age_match = re.search(r"வயது\s*[,&;:\-ஃ]?\s*(\d{1,3})", word_clean)
+                if is_tamil_age:
+                    age_match = re.search(r"வயது\s*[,&;:\-ஃ]?\s*(\d{1,3})", word_clean)
+                else:
+                    age_match = re.search(r"age\s*[,&;:\-ஃ]?\s*(\d{1,3})", word_clean, re.IGNORECASE)
+                
                 if age_match:
                     age_val = age_match.group(1)
                     if 1 <= int(age_val) <= 120:
                         return age_val
                 
-                # Try next word
-                if i + 1 < len(words):
-                    next_word = words[i + 1].strip().lstrip(",&;:-ஃ")
-                    # Check if next word contains a number
+                # Look for age in next few words (skip Tamil placeholders)
+                for j in range(i + 1, min(i + 4, len(words))):
+                    next_word = words[j].strip().lstrip(",&;:-ஃ:")
+                    
+                    # Skip Tamil placeholder words
+                    if any(p in next_word for p in tamil_placeholders):
+                        continue
+                    
+                    # Check if this word contains a number
                     age_match = re.search(r"(\d{1,3})", next_word)
                     if age_match:
                         age_val = age_match.group(1)
                         if 1 <= int(age_val) <= 120:
                             return age_val
+                    
+                    # If it's not a number and not a placeholder, stop looking
+                    if next_word and not re.search(r'[\u0B80-\u0BFF]', next_word):
+                        break
         
         # Also look for age pattern anywhere in words (fallback)
         all_text = " ".join(words)
+        # Try Tamil pattern first
         age_match = re.search(r"வயது\s*[,&;:\-ஃ]?\s*(\d{1,3})", all_text)
+        if age_match:
+            age_val = age_match.group(1)
+            if 1 <= int(age_val) <= 120:
+                return age_val
+        
+        # Try English pattern - allow Tamil placeholder words between Age and number
+        # Pattern: Age [optional Tamil placeholder] number
+        age_match = re.search(r"\bage\s*[,&;:\-ஃ:]?\s*(?:[\u0B80-\u0BFF]+\s*)?(\d{1,3})", all_text, re.IGNORECASE)
         if age_match:
             age_val = age_match.group(1)
             if 1 <= int(age_val) <= 120:

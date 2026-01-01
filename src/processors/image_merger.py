@@ -25,7 +25,7 @@ from ..config import Config
 
 
 # Maximum number of voters per merged batch image
-MAX_VOTERS_PER_BATCH = 10
+MAX_VOTERS_PER_BATCH = 5
 
 
 @dataclass

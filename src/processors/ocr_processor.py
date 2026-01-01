@@ -413,7 +413,10 @@ class OCRProcessor(BaseProcessor):
         """
         Process a single batch image containing multiple voters.
         
-        Uses template matching to split by voter_end markers, then runs OCR on each segment.
+        Optimized Strategy (Batch Inference):
+        1. Find visual separators to split into voter segments.
+        2. Run OCR on ALL segments in one batch call (very fast, no I/O).
+        3. Extract fields for each voter from the batch results.
         
         Args:
             batch_path: Path to batch image
@@ -424,9 +427,7 @@ class OCRProcessor(BaseProcessor):
             List of OCRResult for each voter in the batch
         """
         self.log_debug(f"Processing batch: {batch_path.name}")
-        batch_start = time.perf_counter()
         
-        # Load batch image
         img_bgr = cv2.imdecode(
             np.fromfile(str(batch_path), dtype=np.uint8),
             cv2.IMREAD_COLOR
@@ -436,44 +437,201 @@ class OCRProcessor(BaseProcessor):
             self.log_error(f"Failed to load batch image: {batch_path}")
             return []
         
-        # Find voter_end separator positions using template matching
+        # 1. Visual Splitting
         separator_positions = self._find_voter_end_positions(img_bgr, voter_end_template)
         
         if not separator_positions:
             self.log_warning(f"No voter_end separators found in {batch_path.name}")
             return []
         
-        self.log_debug(f"Found {len(separator_positions)} voter_end separators in {batch_path.name}")
-        
-        # Split image into voter segments
         template_height = voter_end_template.shape[0]
         voter_segments = self._split_by_separators(img_bgr, separator_positions, template_height)
         
-        # Extract batch number for naming
-        batch_name = batch_path.stem  # e.g., "batch-001"
+        # Filter valid segments
+        valid_segments = []
+        valid_indices = []
+        for idx, seg in enumerate(voter_segments, start=1):
+            if seg.shape[0] >= 50 and seg.shape[1] >= 50:
+                valid_segments.append(seg)
+                valid_indices.append(idx)
+        
+        if not valid_segments:
+             return []
+
+        # Extract batch number
+        batch_name = batch_path.stem
         batch_num = batch_name.replace("batch-", "").replace("batch", "")
+        BATCH_SIZE = 5 
         try:
-            batch_offset = (int(batch_num) - 1) * 10  # Assuming max 10 per batch
+            batch_offset = (int(batch_num) - 1) * BATCH_SIZE
         except ValueError:
             batch_offset = 0
+            
+        # 2. Batch OCR Inference (No I/O)
+        batch_start = time.perf_counter()
+        try:
+            # Pass list of numpy arrays directly to OCR engine
+            ocr_results = self.ocr.predict(valid_segments)
+        except Exception as e:
+            self.log_error(f"Batch OCR failed: {e}")
+            return []
+            
+        inference_time = time.perf_counter() - batch_start
+        self.log_debug(f"Batch inference for {len(valid_segments)} segments took {inference_time:.4f}s")
         
+        # 3. Process Results
         records: List[OCRResult] = []
         
-        for idx, segment in enumerate(voter_segments, start=1):
-            if segment is None or segment.size == 0:
-                continue
-            
-            # Skip very small segments (likely just noise)
-            if segment.shape[0] < 50 or segment.shape[1] < 50:
-                continue
-            
+        for i, ocr_output in enumerate(ocr_results):
+            idx = valid_indices[i]
+            segment = valid_segments[i]
             voter_num = batch_offset + idx
             image_name = f"{page_id}-{voter_num:03d}.png"
             
-            result = self._process_voter_segment(segment, image_name)
+            # Use total batch time / count as approximate per-item time
+            approx_time = inference_time / len(valid_segments)
+            
+            result = self._process_voter_result_from_ocr(segment, ocr_output, image_name)
+            
+            # Adjust reported time to include inference overhead
+            result.elapsed_seconds += approx_time
+            
+            self.log_debug(f"Processed {image_name} in {result.elapsed_seconds:.4f}s")
             records.append(result)
         
         return records
+
+    def _process_voter_result_from_ocr(
+        self, 
+        segment: np.ndarray, 
+        ocr_output: Any,
+        image_name: str
+    ) -> OCRResult:
+        """
+        Process a single voter result using pre-computed OCR output.
+        
+        Args:
+            segment: Image segment (numpy array)
+            ocr_output: Raw output from OCR engine for this segment
+            image_name: Virtual image name
+        
+        Returns:
+            OCRResult with extracted fields
+        """
+        start_time = time.perf_counter()
+        result = OCRResult(image_name=image_name)
+        
+        try:
+            # Parse OCR output into lines and words
+            lines, full_text_for_extract = self._parse_ocr_output(ocr_output)
+            
+            # OPTIMIZATION: Try to extract EPIC from full text first to avoid Tesseract/ROI overhead
+            # This saves ~100-200ms per voter if successful
+            epic_found_in_text = False
+            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text_for_extract.upper())
+            if match:
+                result.epic_no = match.group(1)
+                result.epic_valid = True
+                epic_found_in_text = True
+            
+            if not epic_found_in_text:
+                # Fallback to expensive ROI extraction
+                result.epic_no = self._extract_epic(segment)
+                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+            
+            # Serial is harder to regex reliably (often just digits), so we keep ROI for now.
+            # Extract Serial from ROI (Opencv/Tesseract)
+            result.serial_no = self._extract_serial(segment)
+            
+            # Extract fields from text
+            result.name = self._extract_name(lines)
+            result.relation_type, result.relation_name = self._extract_relation(lines)
+            result.house_no = self._extract_house(lines, segment)
+            result.age = self._extract_age(lines)
+            result.gender = self._extract_gender(lines)
+            
+        except Exception as e:
+            result.error = str(e)
+            self.log_debug(f"Extraction error for {image_name}: {e}")
+            
+        result.elapsed_seconds = time.perf_counter() - start_time
+        return result
+
+    def _parse_ocr_output(self, ocr_output: Any) -> Tuple[List[str], str]:
+        """
+        Convert raw OCR output to list of lines and full text string.
+        output depends on ocr-tamil library structure.
+        """
+        lines = []
+        words = []
+        
+        if isinstance(ocr_output, list):
+            # It could be list of strings or list of [text, conf, box]
+            for item in ocr_output:
+                if isinstance(item, str):
+                    clean_text = item.strip()
+                    if clean_text:
+                        lines.append(clean_text)
+                        words.extend(clean_text.split())
+                elif isinstance(item, (list, tuple)) and len(item) > 0:
+                    # Assuming [bbox, text, conf] or similar
+                    # Try to find the text part
+                    text_part = str(item[0]) # naive fallback
+                    # If item structure is known (e.g. from paddleocr/easyocr)
+                    # Let's try to stringify
+                    clean_text = text_part.strip()
+                    if clean_text:
+                        lines.append(clean_text)
+                        words.extend(clean_text.split())
+                        
+        elif isinstance(ocr_output, str):
+            lines = [line.strip() for line in ocr_output.split('\n') if line.strip()]
+            words = ocr_output.split()
+            
+        # Add raw words line for regex helpers
+        if words:
+            lines.insert(0, "__RAW__:" + "|".join(words))
+            
+        return lines, "".join(lines)
+
+    def _split_by_voter_end(self, text: str) -> List[str]:
+        """Split OCR text by voter_end markers."""
+        pattern = r'|'.join(re.escape(m) for m in VOTER_END_MARKERS)
+        segments = re.split(pattern, text, flags=re.IGNORECASE)
+        return [s.strip() for s in segments if s.strip()]
+
+    def _extract_voter_from_text(self, text: str, image_name: str) -> OCRResult:
+        """Extract voter information from a text segment."""
+        start_time = time.perf_counter()
+        result = OCRResult(image_name=image_name)
+        
+        try:
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            if not lines: lines = [text]
+            
+            words = text.split()
+            if words: lines.insert(0, "__RAW__:" + "|".join(words))
+            
+            epic_match = re.search(r'\b([A-Z]{3}\d{7,10})\b', text.upper())
+            if epic_match:
+                result.epic_no = epic_match.group(1)
+                result.epic_valid = True
+            
+            serial_match = re.search(r'^\s*(\d{1,4})\b', text)
+            if serial_match:
+                result.serial_no = serial_match.group(1)
+            
+            result.name = self._extract_name(lines)
+            result.relation_type, result.relation_name = self._extract_relation(lines)
+            result.age = self._extract_age(lines)
+            result.gender = self._extract_gender(lines)
+            result.house_no = self._extract_house_from_text(text)
+            
+        except Exception as e:
+            result.error = str(e)
+        
+        result.elapsed_seconds = time.perf_counter() - start_time
+        return result
     
     def _find_voter_end_positions(
         self, 

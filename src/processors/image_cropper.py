@@ -15,6 +15,7 @@ from typing import List, Tuple, Optional, Any
 
 import cv2
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base import BaseProcessor, ProcessingContext
 from ..exceptions import CropExtractionError
@@ -175,20 +176,36 @@ class ImageCropper(BaseProcessor):
         
         run_start = time.perf_counter()
         
-        for img_path in page_images:
-            result = self._process_page(img_path)
+        # Parallel processing of pages
+        max_workers = min(os.cpu_count() or 4, 8)  # Cap workers to avoid OOM
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Map futures to image paths
+            future_to_path = {
+                executor.submit(self._process_page, p): p 
+                for p in page_images
+            }
             
-            if result is None:
-                unreadable += 1
-                continue
-            
-            self.page_results.append(result)
-            processed += 1
-            
-            if result.crops_saved == 0:
-                skipped += 1
-            else:
-                total_crops += result.crops_saved
+            for future in as_completed(future_to_path):
+                img_path = future_to_path[future]
+                try:
+                    result = future.result()
+                    
+                    if result is None:
+                        unreadable += 1
+                        continue
+                    
+                    self.page_results.append(result)
+                    processed += 1
+                    
+                    if result.crops_saved == 0:
+                        skipped += 1
+                    else:
+                        total_crops += result.crops_saved
+                        
+                except Exception as e:
+                    self.log_error(f"Error processing {img_path.name}: {e}")
+                    unreadable += 1
         
         elapsed = time.perf_counter() - run_start
         
@@ -329,7 +346,7 @@ class ImageCropper(BaseProcessor):
             
             # Create directory on first save
             if not crops_dir.exists():
-                crops_dir.mkdir(parents=True)
+                crops_dir.mkdir(parents=True, exist_ok=True)
             
             # Save crop
             crop_name = f"{page_id}-{box.box_index:03d}.png"
@@ -746,16 +763,11 @@ class ImageCropper(BaseProcessor):
         if abs(angle) > 0.2:
             gray = self._rotate_image(gray, angle)
         
-        # Upscale
-        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        # Upscale (Linear is faster than Cubic)
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
         
-        # Denoise
-        gray = cv2.fastNlMeansDenoising(
-            gray, None,
-            h=8,
-            templateWindowSize=7,
-            searchWindowSize=21
-        )
+        # Denoise (Median blur is much faster than NlMeans)
+        gray = cv2.medianBlur(gray, 3)
         
         # Contrast normalization
         gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
@@ -797,7 +809,7 @@ class ImageCropper(BaseProcessor):
         M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, 1.0)
         return cv2.warpAffine(
             img, M, (w, h),
-            flags=cv2.INTER_CUBIC,
+            flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REPLICATE
         )
 

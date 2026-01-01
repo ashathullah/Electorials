@@ -89,6 +89,9 @@ GENDER_MAP = {
 
 PHOTO_MARKERS = ["photo", "phot", "available", "புகைப்பட", "படம்"]
 
+# Voter separator markers (from voter_end.jpg)
+VOTER_END_MARKERS = ["voter_end", "voter-end", "voterend", "VOTER_END", "VOTER-END", "VOTEREND"]
+
 
 @dataclass
 class WordBox:
@@ -184,6 +187,7 @@ class OCRProcessor(BaseProcessor):
         allow_next_line: bool = True,
         dump_raw_ocr: bool = False,
         use_cuda: bool = True,
+        use_merged: bool = False,
     ):
         """
         Initialize OCR processor.
@@ -194,15 +198,20 @@ class OCRProcessor(BaseProcessor):
             allow_next_line: Allow value on next line if not found on label line
             dump_raw_ocr: Dump raw OCR text for debugging
             use_cuda: Enable CUDA for Tamil OCR (if available)
+            use_merged: Use merged images from /merged folder for faster processing
         """
         super().__init__(context)
         self.languages = languages
         self.allow_next_line = allow_next_line
         self.dump_raw_ocr = dump_raw_ocr
         self.use_cuda = use_cuda
+        self.use_merged = use_merged
         self.ocr_config = self.config.ocr  # Contains ROI configs
         self.page_results: List[PageOCRResult] = []
         self._ocr_initialized = False
+        
+        # Merged images directory - inside extracted folder
+        self.merged_dir = self.context.extracted_dir / "merged" if self.context.extracted_dir else None
     
     def validate(self) -> bool:
         """Validate prerequisites."""
@@ -210,13 +219,21 @@ class OCRProcessor(BaseProcessor):
             self.log_error("Tamil OCR not available. Install: pip install ocr-tamil")
             return False
         
-        if not self.context.crops_dir:
-            self.log_error("Crops directory not set")
-            return False
+        # For merged mode, check merged directory
+        if self.use_merged:
+            if not self.merged_dir or not self.merged_dir.exists():
+                self.log_warning(f"Merged directory not found, falling back to individual crops")
+                self.use_merged = False
         
-        if not self.context.crops_dir.exists():
-            self.log_error(f"Crops directory not found: {self.context.crops_dir}")
-            return False
+        # Check crops directory for fallback or non-merged mode
+        if not self.use_merged:
+            if not self.context.crops_dir:
+                self.log_error("Crops directory not set")
+                return False
+            
+            if not self.context.crops_dir.exists():
+                self.log_error(f"Crops directory not found: {self.context.crops_dir}")
+                return False
         
         return True
     
@@ -256,11 +273,28 @@ class OCRProcessor(BaseProcessor):
         """
         Process all cropped images in the document.
         
+        If use_merged is True and merged images exist, process those for faster
+        extraction. Otherwise, fall back to individual cropped images.
+        
         Returns:
             True if processing succeeded
         """
         self._initialize_ocr()
         
+        # Try merged image processing if enabled
+        if self.use_merged and self.merged_dir and self.merged_dir.exists():
+            return self._process_merged_images()
+        
+        # Fall back to individual crop processing
+        return self._process_individual_crops()
+    
+    def _process_individual_crops(self) -> bool:
+        """
+        Process individual cropped images (original method).
+        
+        Returns:
+            True if processing succeeded
+        """
         crops_dir = self.context.crops_dir
         page_dirs = self._get_page_dirs(crops_dir)
         
@@ -282,6 +316,351 @@ class OCRProcessor(BaseProcessor):
         
         return True
     
+    def _process_merged_images(self) -> bool:
+        """
+        Process merged batch images for faster OCR.
+        
+        Each batch image contains up to 10 voter images separated by voter_end markers.
+        Uses template matching to split the batch into individual voter images,
+        then runs OCR on each segment.
+        
+        Merged structure: merged/<page-XXX>/<batch-001.png, batch-002.png, ...>
+        
+        Returns:
+            True if processing succeeded
+        """
+        if not self.merged_dir or not self.merged_dir.exists():
+            self.log_warning(f"Merged directory not found at {self.merged_dir}, falling back to individual crops")
+            return self._process_individual_crops()
+        
+        # Load voter_end template for template matching
+        voter_end_path = self.config.base_dir / "voter_end.jpg"
+        if not voter_end_path.exists():
+            self.log_warning("voter_end.jpg not found, falling back to individual crops")
+            return self._process_individual_crops()
+        
+        voter_end_template = cv2.imdecode(
+            np.fromfile(str(voter_end_path), dtype=np.uint8),
+            cv2.IMREAD_COLOR
+        )
+        if voter_end_template is None:
+            self.log_warning("Failed to load voter_end.jpg, falling back to individual crops")
+            return self._process_individual_crops()
+        
+        # Get page directories (same structure as crops)
+        page_dirs = self._get_page_dirs(self.merged_dir)
+        
+        if not page_dirs:
+            self.log_warning(f"No page directories found in {self.merged_dir}, falling back to individual crops")
+            return self._process_individual_crops()
+        
+        self.log_info(f"Processing {len(page_dirs)} page(s) with merged batches")
+        
+        total_voters = 0
+        total_batches = 0
+        
+        for page_dir in page_dirs:
+            page_id = page_dir.name
+            batch_images = self._get_batch_images(page_dir)
+            
+            if not batch_images:
+                self.log_debug(f"No batch images in {page_dir}")
+                continue
+            
+            self.log_debug(f"Processing {len(batch_images)} batches from {page_id}")
+            
+            page_records: List[OCRResult] = []
+            page_start_time = time.perf_counter()
+            
+            for batch_path in batch_images:
+                batch_records = self._process_batch_image(batch_path, page_id, voter_end_template)
+                page_records.extend(batch_records)
+                total_batches += 1
+            
+            page_time = time.perf_counter() - page_start_time
+            
+            result = PageOCRResult(
+                page_id=page_id,
+                images_processed=len(page_records),
+                total_seconds=page_time,
+                records=page_records,
+            )
+            
+            self.page_results.append(result)
+            total_voters += len(page_records)
+            self.context.total_voters_found += len(page_records)
+            
+            self.log_info(f"Processed {page_id}: {len(page_records)} voters from {len(batch_images)} batch(es)")
+        
+        self.log_info(f"OCR complete (merged batches): {total_voters} voters from {total_batches} batches")
+        
+        return True
+    
+    def _get_batch_images(self, page_dir: Path) -> List[Path]:
+        """Get sorted batch images from a page directory."""
+        if not page_dir.exists():
+            return []
+        exts = {".png", ".jpg", ".jpeg"}
+        images = [p for p in page_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+        return sorted(images)
+    
+    def _process_batch_image(
+        self, 
+        batch_path: Path, 
+        page_id: str,
+        voter_end_template: np.ndarray
+    ) -> List[OCRResult]:
+        """
+        Process a single batch image containing multiple voters.
+        
+        Uses template matching to split by voter_end markers, then runs OCR on each segment.
+        
+        Args:
+            batch_path: Path to batch image
+            page_id: Parent page ID for naming
+            voter_end_template: Template image for matching separator
+        
+        Returns:
+            List of OCRResult for each voter in the batch
+        """
+        self.log_debug(f"Processing batch: {batch_path.name}")
+        batch_start = time.perf_counter()
+        
+        # Load batch image
+        img_bgr = cv2.imdecode(
+            np.fromfile(str(batch_path), dtype=np.uint8),
+            cv2.IMREAD_COLOR
+        )
+        
+        if img_bgr is None:
+            self.log_error(f"Failed to load batch image: {batch_path}")
+            return []
+        
+        # Find voter_end separator positions using template matching
+        separator_positions = self._find_voter_end_positions(img_bgr, voter_end_template)
+        
+        if not separator_positions:
+            self.log_warning(f"No voter_end separators found in {batch_path.name}")
+            return []
+        
+        self.log_debug(f"Found {len(separator_positions)} voter_end separators in {batch_path.name}")
+        
+        # Split image into voter segments
+        template_height = voter_end_template.shape[0]
+        voter_segments = self._split_by_separators(img_bgr, separator_positions, template_height)
+        
+        # Extract batch number for naming
+        batch_name = batch_path.stem  # e.g., "batch-001"
+        batch_num = batch_name.replace("batch-", "").replace("batch", "")
+        try:
+            batch_offset = (int(batch_num) - 1) * 10  # Assuming max 10 per batch
+        except ValueError:
+            batch_offset = 0
+        
+        records: List[OCRResult] = []
+        
+        for idx, segment in enumerate(voter_segments, start=1):
+            if segment is None or segment.size == 0:
+                continue
+            
+            # Skip very small segments (likely just noise)
+            if segment.shape[0] < 50 or segment.shape[1] < 50:
+                continue
+            
+            voter_num = batch_offset + idx
+            image_name = f"{page_id}-{voter_num:03d}.png"
+            
+            result = self._process_voter_segment(segment, image_name)
+            records.append(result)
+        
+        return records
+    
+    def _find_voter_end_positions(
+        self, 
+        img: np.ndarray, 
+        template: np.ndarray,
+        threshold: float = 0.7
+    ) -> List[int]:
+        """
+        Find vertical positions of voter_end separators using template matching.
+        
+        Args:
+            img: The merged image
+            template: The voter_end template image
+            threshold: Matching threshold (0-1)
+        
+        Returns:
+            List of y-coordinates where separators were found
+        """
+        # Convert to grayscale for matching
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        
+        # In ImageMerger, the voter_end image is padded, not scaled.
+        # So we should primarily look for the template at its original scale.
+        
+        positions = []
+        scales = [1.0]
+        
+        # Try slight variations just in case of minor resizing artifacts
+        if img.shape[1] > template.shape[1] * 2:
+             scales = [1.0, 0.95, 1.05]
+        
+        best_score = 0.0
+        
+        for scale in scales:
+            if scale != 1.0:
+                new_width = int(template.shape[1] * scale)
+                new_height = int(template.shape[0] * scale)
+                if new_width > img.shape[1] or new_height > img.shape[0]:
+                    continue
+                scaled_template = cv2.resize(template_gray, (new_width, new_height))
+            else:
+                scaled_template = template_gray
+            
+            # Template matching
+            try:
+                result = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+                
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                if max_val > best_score:
+                    best_score = max_val
+                
+                # Find all locations above threshold
+                locations = np.where(result >= threshold)
+                
+                for y in locations[0]:
+                    # Check if this position is not too close to an existing one
+                    is_duplicate = False
+                    for existing_y in positions:
+                        if abs(y - existing_y) < template.shape[0] * 2:
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        positions.append(int(y))
+                        
+            except cv2.error as e:
+                self.log_debug(f"Template matching error at scale {scale}: {e}")
+                continue
+        
+        if not positions:
+            self.log_debug(f"No separators found. Best score was {best_score:.4f} (threshold: {threshold})")
+        
+        # Sort positions by y-coordinate
+        return sorted(positions)
+    
+    def _split_by_separators(
+        self,
+        img: np.ndarray,
+        separator_positions: List[int],
+        template_height: int
+    ) -> List[np.ndarray]:
+        """
+        Split image into segments based on separator positions.
+        
+        Args:
+            img: The merged image
+            separator_positions: Y-coordinates of separators
+            template_height: Height of the separator template
+        
+        Returns:
+            List of image segments (one per voter)
+        """
+        segments = []
+        
+        # Add start and end boundaries
+        start_y = 0
+        
+        for sep_y in separator_positions:
+            # Segment from start_y to separator
+            if sep_y > start_y:
+                segment = img[start_y:sep_y, :]
+                segments.append(segment)
+            
+            # Move start to after the separator
+            start_y = sep_y + template_height
+        
+        # Don't add remaining segment after last separator 
+        # (it's just the last voter_end with nothing after)
+        
+        return segments
+    
+    def _process_voter_segment(self, segment: np.ndarray, image_name: str) -> OCRResult:
+        """
+        Process a single voter segment extracted from merged image.
+        
+        Args:
+            segment: Image segment for one voter
+            image_name: Virtual image name for this voter
+        
+        Returns:
+            OCRResult with extracted fields
+        """
+        start_time = time.perf_counter()
+        result = OCRResult(image_name=image_name)
+        
+        try:
+            # Save segment temporarily for OCR (Tamil OCR expects file path)
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+                cv2.imwrite(tmp_path, segment)
+            
+            try:
+                # Run Tamil OCR on the segment
+                lines = self._run_tamil_ocr(Path(tmp_path), segment)
+                
+                # Extract EPIC from ROI
+                result.epic_no = self._extract_epic(segment)
+                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+                
+                # Extract Serial from ROI
+                result.serial_no = self._extract_serial(segment)
+                
+                # Extract fields from lines
+                result.name = self._extract_name(lines)
+                result.relation_type, result.relation_name = self._extract_relation(lines)
+                result.house_no = self._extract_house(lines, segment)
+                result.age = self._extract_age(lines)
+                result.gender = self._extract_gender(lines)
+                
+            finally:
+                # Clean up temp file
+                import os
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+                
+        except Exception as e:
+            result.error = str(e)
+            self.log_debug(f"OCR error for {image_name}: {e}")
+        
+        result.elapsed_seconds = time.perf_counter() - start_time
+        return result
+
+    def _extract_house_from_text(self, text: str) -> str:
+        """Extract house number from text segment."""
+        for pattern in HOUSE_PATTERNS:
+            match = re.search(
+                rf"(?:{pattern})\s*[:\-–—]?\s*([A-Za-z0-9\-/]+)",
+                text,
+                re.IGNORECASE | re.UNICODE
+            )
+            if match:
+                return match.group(1).strip()
+        return ""
+    
+    def _get_merged_images(self) -> List[Path]:
+        """Legacy method - get all merged page images (deprecated)."""
+        if not self.merged_dir or not self.merged_dir.exists():
+            return []
+        exts = {".png", ".jpg", ".jpeg"}
+        images = [p for p in self.merged_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+        return sorted(images)
+    
+
     def _get_page_dirs(self, crops_dir: Path) -> List[Path]:
         """Get sorted page directories."""
         if not crops_dir.exists():

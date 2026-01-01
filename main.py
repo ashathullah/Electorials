@@ -68,6 +68,7 @@ from src.processors import (
     PDFExtractor,
     MetadataExtractor,
     ImageCropper,
+    ImageMerger,
     OCRProcessor,
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
@@ -145,9 +146,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "ocr", "all"],
+        choices=["extract", "metadata", "crop", "merge", "ocr", "all"],
         default="all",
-        help="Run specific processing step (default: all)",
+        help="Run specific processing step (default: all). 'merge' combines cropped images with voter_end separators.",
     )
     
     parser.add_argument(
@@ -196,7 +197,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Diagram/photo filter for cropping (default: auto)",
     )
-    
+        
     parser.add_argument(
         "--skip-metadata",
         action="store_true",
@@ -207,6 +208,12 @@ def parse_args() -> argparse.Namespace:
         "--dump-raw-ocr",
         action="store_true",
         help="Dump raw OCR text for debugging",
+    )
+    
+    parser.add_argument(
+        "--use-merged",
+        action="store_true",
+        help="Use merged images for OCR (faster processing). Requires running merge step first.",
     )
     
     return parser.parse_args()
@@ -310,14 +317,26 @@ def process_pdf(
         elif cropper.summary:
             logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
     
-    # Step 4: OCR extraction
+    # Step 4: Merge cropped images
+    if args.step in ["merge", "all"]:
+        logger.info("Step 4: Merging cropped images...")
+        
+        merger = ImageMerger(context)
+        if merger.run() and merger.summary:
+            logger.info(
+                f"Merged {merger.summary.total_images_merged} images into "
+                f"{merger.summary.total_batch_files} batches"
+            )
+    
+    # Step 5: OCR extraction
     if args.step in ["ocr", "all"]:
-        logger.info("Step 4: Running OCR extraction...")
+        logger.info("Step 5: Running OCR extraction...")
         
         ocr_processor = OCRProcessor(
             context,
             languages=args.languages,
             dump_raw_ocr=args.dump_raw_ocr,
+            use_merged=args.use_merged,
         )
         
         if ocr_processor.run():
@@ -417,6 +436,17 @@ def process_extracted_folder(
         if cropper.run() and cropper.summary:
             logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
     
+    # Step: Merge cropped images
+    if args.step in ["merge", "all"]:
+        logger.info("Merging cropped images...")
+        
+        merger = ImageMerger(context)
+        if merger.run() and merger.summary:
+            logger.info(
+                f"Merged {merger.summary.total_images_merged} images into "
+                f"{merger.summary.total_batch_files} batches"
+            )
+    
     # Step: OCR extraction
     if args.step in ["ocr", "all"]:
         logger.info("Running OCR extraction...")
@@ -425,6 +455,7 @@ def process_extracted_folder(
             context,
             languages=args.languages,
             dump_raw_ocr=args.dump_raw_ocr,
+            use_merged=args.use_merged,
         )
         
         if ocr_processor.run():
@@ -531,7 +562,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "ocr", "metadata"] and not args.paths:
+    if args.step in ["crop", "merge", "ocr", "metadata"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

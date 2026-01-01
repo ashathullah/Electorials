@@ -7,10 +7,16 @@ PyMuPDF>=1.24.0           # PDF to image extraction (import as fitz)
 # Image Processing
 opencv-python>=4.9.0      # Image manipulation, cropping, preprocessing
 numpy>=1.26.0             # Array operations for image processing
-Pillow>=10.2.0            # Image loading for Tesseract
+Pillow>=10.2.0            # Image loading
 
-# OCR
-pytesseract>=0.3.10       # Tesseract OCR Python wrapper
+# OCR - Tamil OCR (Primary - better accuracy for Tamil text)
+ocr-tamil>=0.4.0          # Tamil OCR with CRAFT text detection
+                          # https://github.com/gnana70/tamil_ocr
+                          # Supports both Tamil and English text
+                          # 10-40% faster than Tesseract/EasyOCR
+
+# OCR - Tesseract (Optional fallback for EPIC/Serial numbers)
+pytesseract>=0.3.10       # Tesseract OCR Python wrapper (optional)
 # Note: Requires Tesseract OCR installed separately:
 # - Windows: https://github.com/UB-Mannheim/tesseract/wiki
 # - Linux: apt-get install tesseract-ocr tesseract-ocr-tam

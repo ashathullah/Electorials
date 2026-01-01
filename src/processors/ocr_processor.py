@@ -1,10 +1,12 @@
 """
 OCR Processor for voter information extraction.
 
-Extracts structured voter data from cropped images using Tesseract OCR:
+Extracts structured voter data from cropped images using Tamil OCR:
 - EPIC number (via ROI extraction)
 - Serial number (via ROI extraction)
 - Name, relation, house number, age, gender (via line-based text extraction)
+
+Uses ocr_tamil (https://github.com/gnana70/tamil_ocr) for better Tamil text recognition.
 """
 
 from __future__ import annotations
@@ -19,6 +21,14 @@ import cv2
 import numpy as np
 from PIL import Image
 
+# Tamil OCR - better accuracy for Tamil text
+try:
+    from ocr_tamil.ocr import OCR as TamilOCR
+    TAMIL_OCR_AVAILABLE = True
+except ImportError:
+    TAMIL_OCR_AVAILABLE = False
+
+# Tesseract as fallback
 try:
     import pytesseract
     from pytesseract import Output
@@ -155,14 +165,17 @@ class PageOCRResult:
 
 class OCRProcessor(BaseProcessor):
     """
-    Extract voter information from cropped images using Tesseract OCR.
+    Extract voter information from cropped images using Tamil OCR.
     
     Uses hybrid extraction:
     - EPIC and Serial: ROI-based extraction with character whitelisting
-    - Other fields: Line-based text pattern matching
+    - Other fields: Line-based text pattern matching via Tamil OCR
     """
     
     name = "OCRProcessor"
+    
+    # Singleton OCR instance to avoid reloading models
+    _ocr_instance: Optional['TamilOCR'] = None
     
     def __init__(
         self,
@@ -170,28 +183,31 @@ class OCRProcessor(BaseProcessor):
         languages: str = "eng+tam",
         allow_next_line: bool = True,
         dump_raw_ocr: bool = False,
+        use_cuda: bool = True,
     ):
         """
         Initialize OCR processor.
         
         Args:
             context: Processing context
-            languages: Tesseract language codes (default: eng+tam)
+            languages: Language codes (for compatibility, Tamil OCR uses both)
             allow_next_line: Allow value on next line if not found on label line
             dump_raw_ocr: Dump raw OCR text for debugging
+            use_cuda: Enable CUDA for Tamil OCR (if available)
         """
         super().__init__(context)
         self.languages = languages
         self.allow_next_line = allow_next_line
         self.dump_raw_ocr = dump_raw_ocr
+        self.use_cuda = use_cuda
         self.ocr_config = self.config.ocr  # Contains ROI configs
         self.page_results: List[PageOCRResult] = []
-        self._tesseract_initialized = False
+        self._ocr_initialized = False
     
     def validate(self) -> bool:
         """Validate prerequisites."""
-        if not TESSERACT_AVAILABLE:
-            self.log_error("Tesseract not available. Install: pip install pytesseract pillow")
+        if not TAMIL_OCR_AVAILABLE:
+            self.log_error("Tamil OCR not available. Install: pip install ocr-tamil")
             return False
         
         if not self.context.crops_dir:
@@ -204,27 +220,37 @@ class OCRProcessor(BaseProcessor):
         
         return True
     
-    def _initialize_tesseract(self) -> None:
-        """Initialize Tesseract OCR engine."""
-        if self._tesseract_initialized:
+    def _initialize_ocr(self) -> None:
+        """Initialize Tamil OCR engine (singleton pattern)."""
+        if self._ocr_initialized:
             return
         
-        import os
+        if OCRProcessor._ocr_instance is None:
+            self.log_info("Initializing Tamil OCR engine (first time, may download models)...")
+            try:
+                # Initialize Tamil OCR with text detection enabled
+                # detect=True enables CRAFT text detection
+                # details=2 gives us text, confidence, and bbox info
+                OCRProcessor._ocr_instance = TamilOCR(
+                    detect=True,
+                    enable_cuda=self.use_cuda,
+                    batch_size=8,
+                    details=0,  # Just text output for simplicity
+                    lang=["tamil", "english"],
+                    recognize_thres=0.5,  # Lower threshold for voter card text
+                )
+                self.log_info("Tamil OCR initialized successfully")
+            except Exception as e:
+                raise OCRProcessingError(f"Failed to initialize Tamil OCR: {e}")
         
-        # Windows-specific path
-        if os.name == "nt":
-            tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-            if Path(tesseract_path).exists():
-                pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                self.log_debug(f"Using Tesseract from: {tesseract_path}")
-        
-        try:
-            version = pytesseract.get_tesseract_version()
-            self.log_info(f"Tesseract version: {version}")
-        except Exception as e:
-            raise OCRProcessingError(f"Tesseract not available: {e}")
-        
-        self._tesseract_initialized = True
+        self._ocr_initialized = True
+    
+    @property
+    def ocr(self) -> 'TamilOCR':
+        """Get the OCR instance."""
+        if OCRProcessor._ocr_instance is None:
+            self._initialize_ocr()
+        return OCRProcessor._ocr_instance
     
     def process(self) -> bool:
         """
@@ -233,7 +259,7 @@ class OCRProcessor(BaseProcessor):
         Returns:
             True if processing succeeded
         """
-        self._initialize_tesseract()
+        self._initialize_ocr()
         
         crops_dir = self.context.crops_dir
         page_dirs = self._get_page_dirs(crops_dir)
@@ -308,8 +334,8 @@ class OCRProcessor(BaseProcessor):
         
         Uses hybrid extraction:
         1. EPIC via ROI extraction
-        2. Serial via enhanced ROI extraction
-        3. Other fields via line-based text extraction
+        2. Serial via ROI extraction
+        3. Other fields via Tamil OCR for better Tamil text recognition
         """
         start_time = time.perf_counter()
         
@@ -327,16 +353,15 @@ class OCRProcessor(BaseProcessor):
             return result
         
         try:
-            # Extract EPIC (ROI-based)
+            # Full OCR using Tamil OCR for better Tamil text
+            lines = self._run_tamil_ocr(image_path, img_bgr)
+            
+            # Extract EPIC from ROI
             result.epic_no = self._extract_epic(img_bgr)
             result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
             
-            # Extract Serial (ROI-based)
+            # Extract Serial from ROI
             result.serial_no = self._extract_serial(img_bgr)
-            
-            # Full OCR for other fields
-            ocr_data = self._run_full_ocr(image_path)
-            lines = self._reconstruct_lines(ocr_data)
             
             # Extract fields from lines
             result.name = self._extract_name(lines)
@@ -374,11 +399,30 @@ class OCRProcessor(BaseProcessor):
         gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         gray = cv2.fastNlMeansDenoising(gray, None, h=8, templateWindowSize=7, searchWindowSize=21)
         
-        # OCR
-        config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_EPIC}"
-        txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+        # Use Tesseract if available (better for alphanumeric with whitelist)
+        if TESSERACT_AVAILABLE:
+            try:
+                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_EPIC}"
+                txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+                return self._clean_epic(txt.strip())
+            except Exception:
+                pass
         
-        return self._clean_epic(txt.strip())
+        # Use Tamil OCR and filter for EPIC pattern
+        try:
+            # Convert grayscale to BGR for Tamil OCR
+            gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            result = self.ocr.predict(gray_bgr)
+            if result and isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], list):
+                    text = " ".join(str(item) for item in result[0] if item)
+                else:
+                    text = str(result[0]) if result[0] else ""
+                return self._clean_epic(text)
+        except Exception:
+            pass
+        
+        return ""
     
     def _clean_epic(self, raw: str) -> str:
         """Clean EPIC number."""
@@ -411,37 +455,146 @@ class OCRProcessor(BaseProcessor):
         if float(np.mean(gray)) > 180:
             gray = 255 - gray
         
-        # OCR
-        config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_DIGITS}"
-        txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+        # Use Tesseract if available (better for digits with whitelist)
+        if TESSERACT_AVAILABLE:
+            try:
+                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_DIGITS}"
+                txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+                digits = re.sub(r"[^0-9]", "", txt)
+                if digits:
+                    if len(digits) > 4:
+                        digits = digits[-4:]
+                    return digits.lstrip("0") or digits
+            except Exception:
+                pass
         
-        digits = re.sub(r"[^0-9]", "", txt)
-        if not digits:
-            return ""
-        if len(digits) > 4:
-            digits = digits[-4:]
-        return digits.lstrip("0") or digits
+        # Use Tamil OCR and extract digits
+        try:
+            # Convert grayscale to BGR for Tamil OCR
+            gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            result = self.ocr.predict(gray_bgr)
+            if result and isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], list):
+                    text = " ".join(str(item) for item in result[0] if item)
+                else:
+                    text = str(result[0]) if result[0] else ""
+                digits = re.sub(r"[^0-9]", "", text)
+                if digits:
+                    if len(digits) > 4:
+                        digits = digits[-4:]
+                    return digits.lstrip("0") or digits
+        except Exception:
+            pass
+        
+        return ""
     
     # ==================== Full OCR ====================
     
-    def _run_full_ocr(self, image_path: Path) -> Dict[str, Any]:
-        """Run full OCR on image."""
-        img = Image.open(image_path)
+    def _run_tamil_ocr(self, image_path: Path, img_bgr: np.ndarray) -> List[str]:
+        """
+        Run Tamil OCR on image and return lines.
+        
+        Tamil OCR provides better accuracy for Tamil text compared to Tesseract.
+        Tamil OCR with detect=True returns a list of detected words.
+        We combine them into a single text blob and parse as lines.
+        """
         try:
-            # Use PSM 3 (fully automatic page segmentation) for better layout detection
-            # PSM 6 misses lines in voter cards with varied layout
+            # Tamil OCR expects the image path or numpy array
+            result = self.ocr.predict(str(image_path))
+            
+            # Process result - Tamil OCR returns [[word1, word2, ...]]
+            lines = []
+            raw_words = []  # Keep raw words for alternative parsing
+            
+            if result:
+                if isinstance(result, list):
+                    if len(result) > 0:
+                        # Result is typically [[word1, word2, ...]]
+                        if isinstance(result[0], list):
+                            # Get all words
+                            raw_words = [str(w).strip() for w in result[0] if w and str(w).strip()]
+                            if raw_words:
+                                # Create combined text
+                                combined_text = " ".join(raw_words)
+                                
+                                # Also store raw words as a special "raw" line for direct parsing
+                                lines.append("__RAW__:" + "|".join(raw_words))
+                                
+                                # Try to reconstruct lines based on field markers
+                                field_markers = [
+                                    r"பெயர்",        # Name
+                                    r"தந்தை",        # Father
+                                    r"தாய்",         # Mother
+                                    r"கணவர்",        # Husband
+                                    r"வீட்டு",       # House
+                                    r"எண்",          # Number
+                                    r"வயது",        # Age
+                                    r"பாலினம்",      # Gender
+                                    r"Photo",       # Photo marker
+                                ]
+                                
+                                # Split by field markers while keeping the markers
+                                pattern = r'(' + '|'.join(field_markers) + r')'
+                                parts = re.split(pattern, combined_text, flags=re.IGNORECASE | re.UNICODE)
+                                
+                                # Reconstruct lines by pairing markers with their values
+                                current_line = ""
+                                for part in parts:
+                                    part = part.strip()
+                                    if not part:
+                                        continue
+                                    if re.search(r'^(' + '|'.join(field_markers) + r')', part, re.IGNORECASE | re.UNICODE):
+                                        # This is a field marker - start a new line
+                                        if current_line:
+                                            lines.append(current_line.strip())
+                                        current_line = part
+                                    else:
+                                        # This is a value - append to current line
+                                        current_line += " " + part
+                                
+                                if current_line:
+                                    lines.append(current_line.strip())
+                                
+                                # Also add the combined text as a line for fallback parsing
+                                lines.append(combined_text)
+                        else:
+                            # Simple list of words
+                            for item in result:
+                                if item and str(item).strip():
+                                    lines.append(str(item).strip())
+                elif isinstance(result, str):
+                    lines = [line.strip() for line in result.split('\n') if line.strip()]
+            
+            if self.dump_raw_ocr:
+                self.log_debug(f"Tamil OCR result for {image_path.name}: {lines}")
+            
+            return lines
+            
+        except Exception as e:
+            self.log_debug(f"Tamil OCR error for {image_path.name}: {e}")
+            # Fallback to Tesseract if available
+            if TESSERACT_AVAILABLE:
+                return self._run_tesseract_fallback(image_path)
+            return []
+    
+    def _run_tesseract_fallback(self, image_path: Path) -> List[str]:
+        """Fallback to Tesseract OCR if Tamil OCR fails."""
+        try:
+            img = Image.open(image_path)
             config = "--oem 1 --psm 3"
-            return pytesseract.image_to_data(
+            ocr_data = pytesseract.image_to_data(
                 img,
                 lang=self.languages,
                 config=config,
                 output_type=Output.DICT
             )
-        finally:
             img.close()
+            return self._reconstruct_lines_from_tesseract(ocr_data)
+        except Exception:
+            return []
     
-    def _reconstruct_lines(self, ocr_data: Dict[str, Any]) -> List[str]:
-        """Reconstruct text lines from OCR data."""
+    def _reconstruct_lines_from_tesseract(self, ocr_data: Dict[str, Any]) -> List[str]:
+        """Reconstruct text lines from Tesseract OCR data."""
         n = len(ocr_data.get("text", []))
         lines_dict: Dict[Tuple[int, int, int], List[Tuple[int, str]]] = {}
         
@@ -474,6 +627,8 @@ class OCRProcessor(BaseProcessor):
         """Normalize line for matching."""
         s = line.strip()
         s = s.replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+        # Tamil OCR sometimes outputs 'ஃ' or other chars as separator - treat them as colon
+        s = s.replace("ஃ", ":").replace(";", ":").replace(",", ":")
         s = re.sub(r"\s+", " ", s)
         return s
     
@@ -481,8 +636,9 @@ class OCRProcessor(BaseProcessor):
         """Extract value after label and separator."""
         norm_line = self._normalize_line(line)
         
-        # Try pattern with at least one separator (colon, dash, etc.)
-        pattern = rf"(?:{label_pattern})\s*[:\-–—]+\s*(.+?)(?:\s*[\-–—]\s*$|\s*$)"
+        # Try pattern with separator (colon, dash, space etc.) - more flexible for Tamil OCR output
+        # Allow any separator: :, -, space, or nothing after label
+        pattern = rf"(?:{label_pattern})\s*[:\-–—\s]*(.+?)(?:\s*[\-–—]\s*$|\s*$)"
         match = re.search(pattern, norm_line, re.IGNORECASE | re.UNICODE)
         
         if match:
@@ -495,26 +651,92 @@ class OCRProcessor(BaseProcessor):
     
     def _extract_name(self, lines: List[str]) -> str:
         """Extract name from lines."""
-        name_patterns = [r"^பெயர்", r"^name\b"]
+        # First, try to extract from raw words if available
+        for line in lines:
+            if line.startswith("__RAW__:"):
+                words = line[8:].split("|")
+                name = self._extract_name_from_words(words)
+                if name:
+                    return name
+        
+        # Patterns for name label - flexible to handle Tamil OCR variations
+        name_patterns = [r"பெயர்", r"name\b"]
         exclude_patterns = [r"தந்தை", r"தாய்", r"கணவர்", r"father", r"mother", r"husband"]
         
         for line in lines:
-            norm = self._normalize_line(line).lower()
+            if line.startswith("__RAW__:"):
+                continue
+            norm = self._normalize_line(line)
+            norm_lower = norm.lower()
             
-            if any(re.search(p, norm, re.IGNORECASE) for p in exclude_patterns):
+            # Skip if this is a relation line (father/mother/husband name)
+            if any(re.search(p, norm_lower, re.IGNORECASE | re.UNICODE) for p in exclude_patterns):
                 continue
             
             for pattern in name_patterns:
                 if re.search(pattern, norm, re.IGNORECASE | re.UNICODE):
+                    # Extract value after the label
                     value = self._extract_value_after_colon(line, r"(?:பெயர்|name)")
                     if value:
-                        return value
+                        # Clean up any additional noise
+                        value = re.sub(r"^[:\-–—\s]+", "", value)
+                        value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+                        # Remove house number or other fields that might have leaked in
+                        value = re.sub(r"\s*-\s*வீட்டு.*$", "", value)  # Remove - வீட்டு... (house no pattern)
+                        value = re.sub(r"\s*எண்.*$", "", value)
+                        value = re.sub(r"\s*வயது.*$", "", value)
+                        value = re.sub(r"\s*பாலினம்.*$", "", value)
+                        # Remove any trailing dash/hyphen pattern
+                        value = re.sub(r"\s*[-–—]\s*$", "", value)
+                        # Clean pipe characters
+                        value = value.replace("|", " ").strip()
+                        if value and len(value) > 1:
+                            return value
+        
+        return ""
+    
+    def _extract_name_from_words(self, words: List[str]) -> str:
+        """Extract name from raw word list - first பெயர் marker."""
+        # Pattern: பெயர்; பழனிவேல் or பெயர்: பழனிவேல்
+        # Find the FIRST பெயர் marker (not the one after relation type)
+        
+        # Markers that indicate we've passed the first name
+        exclude_after = ["வீட்டு", "தந்தை", "தாய்", "கணவர்", "father", "mother", "husband"]
+        
+        for i, word in enumerate(words):
+            word_clean = word.strip()
+            
+            # Check if this is before any relation marker
+            preceding_text = " ".join(words[:i]).lower()
+            if any(ex in preceding_text for ex in exclude_after):
+                continue
+            
+            # Check if this word contains பெயர் (name marker)
+            if "பெயர்" in word_clean or "பெயர" in word_clean:
+                # Try to extract name from the next word
+                if i + 1 < len(words):
+                    next_word = words[i + 1].strip().rstrip(",;:ஃ%&")
+                    # Skip if next word is another field marker
+                    skip_markers = ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo", "தந்தை", "தாய்", "கணவர்", "-"]
+                    if next_word and not any(m in next_word for m in skip_markers):
+                        # Check if it looks like a Tamil name (contains Tamil characters)
+                        if re.search(r'[\u0B80-\u0BFF]', next_word):
+                            return next_word
         
         return ""
     
     def _extract_relation(self, lines: List[str]) -> Tuple[str, str]:
         """Extract relation type and name."""
+        # First, try to extract from raw words if available
         for line in lines:
+            if line.startswith("__RAW__:"):
+                words = line[8:].split("|")
+                return self._extract_relation_from_words(words)
+        
+        # Fallback to line-based extraction
+        for line in lines:
+            if line.startswith("__RAW__:"):
+                continue
             norm = self._normalize_line(line)
             
             for rel_type, patterns in RELATION_PATTERNS.items():
@@ -526,17 +748,103 @@ class OCRProcessor(BaseProcessor):
                         # Clean up residual label text
                         value = re.sub(r"^பெயர்\s*[:\-–—]?\s*", "", value)
                         value = re.sub(r"^name\s*[:\-–—]?\s*", "", value, flags=re.IGNORECASE)
+                        value = re.sub(r"^[:\-–—\s]+", "", value)
                         
-                        if value:
-                            return rel_type, value.strip()
+                        # Remove trailing content that's not part of the name
+                        value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+                        value = re.sub(r"\s*எண்.*$", "", value)
+                        value = re.sub(r"\s*வீட்டு.*$", "", value)
+                        value = re.sub(r"\s*வயது.*$", "", value)
+                        value = re.sub(r"\s*பாலினம்.*$", "", value)
+                        value = value.strip()
+                        
+                        if value and len(value) > 1:
+                            return rel_type, value
         
         return "", ""
     
+    def _extract_relation_from_words(self, words: List[str]) -> Tuple[str, str]:
+        """Extract relation from raw word list - more accurate for Tamil OCR output."""
+        # Pattern: ... கணவர் பெயர்; ராமசாமி ...
+        # or: ... தந்தையின் பெயர்; ராமசாமி ...
+        # or: ... - பெயர்; ராமசாமி ... (where - comes after relation type indicator)
+        
+        relation_type = ""
+        relation_name = ""
+        
+        # Find relation type markers
+        relation_markers = {
+            "father": ["தந்தை", "தந்தையின்"],
+            "mother": ["தாய்", "தாயின்"],
+            "husband": ["கணவர்", "கணவரின்"],
+        }
+        
+        # First, find if there's a relation type in the words
+        found_relation_idx = -1
+        for i, word in enumerate(words):
+            word_clean = word.strip().rstrip(",;:ஃ%&")
+            for rel_type, markers in relation_markers.items():
+                for marker in markers:
+                    if marker in word_clean:
+                        relation_type = rel_type
+                        found_relation_idx = i
+                        break
+                if relation_type:
+                    break
+            if relation_type:
+                break
+        
+        # If we found a relation type, look for the name after the next பெயர் marker
+        if relation_type and found_relation_idx >= 0:
+            # Look for பெயர் after the relation marker
+            for i in range(found_relation_idx + 1, len(words)):
+                word = words[i].strip()
+                if "பெயர்" in word or "பெயர" in word:
+                    # The next word(s) should be the name
+                    if i + 1 < len(words):
+                        name_word = words[i + 1].strip().rstrip(",;:ஃ%&")
+                        # Skip if it's another marker
+                        if name_word and not any(m in name_word for m in ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo"]):
+                            relation_name = name_word
+                            break
+        
+        # If no explicit relation type found, check if there's a second பெயர் pattern
+        # (indicates relation name even without explicit type marker)
+        if not relation_type:
+            name_count = 0
+            name_indices = []
+            for i, word in enumerate(words):
+                if "பெயர்" in word or "பெயர" in word:
+                    name_count += 1
+                    name_indices.append(i)
+            
+            # If there are two name markers, the second one is likely relation
+            if name_count >= 2 and len(name_indices) >= 2:
+                second_name_idx = name_indices[1]
+                if second_name_idx + 1 < len(words):
+                    name_word = words[second_name_idx + 1].strip().rstrip(",;:ஃ%&")
+                    if name_word and not any(m in name_word for m in ["வீட்டு", "எண்", "வயது", "பாலினம்", "Photo"]):
+                        relation_name = name_word
+                        # Default to father if no type specified
+                        relation_type = "father"
+        
+        return relation_type, relation_name
+    
     def _extract_house(self, lines: List[str], img_bgr: np.ndarray) -> str:
         """Extract house number from lines or ROI fallback."""
+        # First, try to extract from raw words if available
+        for line in lines:
+            if line.startswith("__RAW__:"):
+                words = line[8:].split("|")
+                house = self._extract_house_from_words(words)
+                if house:
+                    return house
+        
         combined_pattern = r"(?:" + "|".join(HOUSE_PATTERNS) + r")"
         
         for line in lines:
+            if line.startswith("__RAW__:"):
+                continue
             norm = self._normalize_line(line)
             
             if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
@@ -571,8 +879,57 @@ class OCRProcessor(BaseProcessor):
         # Fallback to ROI extraction
         return self._extract_house_from_roi(img_bgr)
     
+    def _extract_house_from_words(self, words: List[str]) -> str:
+        """Extract house number from raw word list."""
+        # Pattern: ... வீட்டு ... எண்ஃ1 ... or எண் 1 or எண்:1
+        # Look for எண் followed by a number AFTER வீட்டு marker
+        
+        found_veedu = False  # வீட்டு marker
+        
+        for i, word in enumerate(words):
+            word_clean = word.strip()
+            
+            # Track if we've seen வீட்டு (house) marker
+            if "வீட்டு" in word_clean:
+                found_veedu = True
+                continue
+            
+            # Only look for எண் (number) AFTER வீட்டு marker
+            if found_veedu and ("எண்" in word_clean or "எண" in word_clean):
+                # Try to extract number from the same word (e.g., எண்ஃ1, எண்:1)
+                num_match = re.search(r"எண்?\s*[ஃ;:,&]?\s*(\d+[A-Za-z/\-]*)", word_clean)
+                if num_match:
+                    house_val = num_match.group(1)
+                    # Validate - house numbers are typically short
+                    if len(house_val) <= 10:
+                        return house_val
+                
+                # Try to extract from next word
+                if i + 1 < len(words):
+                    next_word = words[i + 1].strip()
+                    # Check if next word starts with a digit
+                    if next_word and len(next_word) > 0 and next_word[0].isdigit():
+                        num_match = re.match(r"(\d+[A-Za-z/\-]*)", next_word)
+                        if num_match:
+                            house_val = num_match.group(1)
+                            if len(house_val) <= 10:
+                                return house_val
+        
+        # Also look for standalone number pattern after வீட்டுஎண் combined
+        for i, word in enumerate(words):
+            word_clean = word.strip()
+            if "வீட்டுஎண்" in word_clean or "வீட்டு" in word_clean:
+                # Check if house number is embedded like வீட்டுஎயின் or similar with number
+                num_match = re.search(r"[வீட்டு|எண்]+[ஃ;:,&]?\s*(\d+[A-Za-z/\-]*)", word_clean)
+                if num_match:
+                    house_val = num_match.group(1)
+                    if len(house_val) <= 10:
+                        return house_val
+        
+        return ""
+    
     def _extract_house_from_roi(self, img_bgr: np.ndarray) -> str:
-        """Extract house number from ROI as fallback."""
+        """Extract house number from ROI as fallback using Tesseract."""
         roi = self.ocr_config.house_roi.as_tuple()
         house_crop = self._crop_roi(img_bgr, roi)
         
@@ -580,8 +937,29 @@ class OCRProcessor(BaseProcessor):
         gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         gray = cv2.fastNlMeansDenoising(gray, None, h=8, templateWindowSize=7, searchWindowSize=21)
         
-        config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_HOUSE}"
-        txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+        txt = ""
+        
+        # Use Tesseract for house number (alphanumeric with whitelist) if available
+        if TESSERACT_AVAILABLE:
+            try:
+                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_HOUSE}"
+                txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
+            except Exception:
+                pass
+        
+        # Fallback to Tamil OCR
+        if not txt:
+            try:
+                # Convert grayscale to BGR for Tamil OCR
+                gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                result = self.ocr.predict(gray_bgr)
+                if result and isinstance(result, list) and len(result) > 0:
+                    if isinstance(result[0], list):
+                        txt = " ".join(str(item) for item in result[0] if item)
+                    else:
+                        txt = str(result[0]) if result[0] else ""
+            except Exception:
+                txt = ""
         
         # Clean house value
         s = txt.upper()
@@ -593,16 +971,30 @@ class OCRProcessor(BaseProcessor):
         for t in tokens:
             if not re.search(r"\d", t):
                 continue
-            if len(t) <= 12 and re.fullmatch(r"^\d[\dA-Z/\-]{0,11}$", t):
+            # House numbers are typically short - max 6 chars for ROI extraction
+            # Reject values that look like PIN codes (6 digits starting with 6)
+            if len(t) >= 6 and t.isdigit() and t.startswith("6"):
+                continue  # Skip PIN codes
+            if len(t) <= 6 and re.fullmatch(r"^\d[\dA-Z/\-]{0,5}$", t):
                 return t
         
         return ""
     
     def _extract_age(self, lines: List[str]) -> str:
         """Extract age from lines."""
+        # First, try to extract from raw words if available
+        for line in lines:
+            if line.startswith("__RAW__:"):
+                words = line[8:].split("|")
+                age = self._extract_age_from_words(words)
+                if age:
+                    return age
+        
         combined_pattern = r"(?:" + "|".join(AGE_PATTERNS) + r")"
         
         for line in lines:
+            if line.startswith("__RAW__:"):
+                continue
             norm = self._normalize_line(line)
             
             if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
@@ -614,16 +1006,78 @@ class OCRProcessor(BaseProcessor):
                 if age_match:
                     return age_match.group(1)
         
+        # Also try to find any age value in the text (fallback)
+        for line in lines:
+            if line.startswith("__RAW__:"):
+                continue
+            norm = self._normalize_line(line)
+            # Look for pattern like "79" after any text containing age indicator
+            age_pattern = re.search(r"(?:வயது|age)\s*[:\-–—,]?\s*(\d{1,3})", norm, re.IGNORECASE | re.UNICODE)
+            if age_pattern:
+                age_val = age_pattern.group(1)
+                if 1 <= int(age_val) <= 120:
+                    return age_val
+        
+        return ""
+    
+    def _extract_age_from_words(self, words: List[str]) -> str:
+        """Extract age from raw word list."""
+        # Pattern: வயது,77 or வயது&77 or வயது:77 or வயது 77
+        for i, word in enumerate(words):
+            word_clean = word.strip()
+            
+            # Check if this word contains வயது (age marker)
+            if "வயது" in word_clean:
+                # Try to extract age from the same word (e.g., வயது,77, வயது&77)
+                # Handle various separators: , & ; : - and Tamil special chars
+                age_match = re.search(r"வயது\s*[,&;:\-ஃ]?\s*(\d{1,3})", word_clean)
+                if age_match:
+                    age_val = age_match.group(1)
+                    if 1 <= int(age_val) <= 120:
+                        return age_val
+                
+                # Try next word
+                if i + 1 < len(words):
+                    next_word = words[i + 1].strip().lstrip(",&;:-ஃ")
+                    # Check if next word contains a number
+                    age_match = re.search(r"(\d{1,3})", next_word)
+                    if age_match:
+                        age_val = age_match.group(1)
+                        if 1 <= int(age_val) <= 120:
+                            return age_val
+        
+        # Also look for age pattern anywhere in words (fallback)
+        all_text = " ".join(words)
+        age_match = re.search(r"வயது\s*[,&;:\-ஃ]?\s*(\d{1,3})", all_text)
+        if age_match:
+            age_val = age_match.group(1)
+            if 1 <= int(age_val) <= 120:
+                return age_val
+        
         return ""
     
     def _extract_gender(self, lines: List[str]) -> str:
         """Extract gender from lines."""
         combined_pattern = r"(?:" + "|".join(GENDER_PATTERNS) + r")"
         
+        # First, look for gender in the combined text of all lines
+        all_text = " ".join(lines)
+        
+        # Look for explicit gender words anywhere
+        if re.search(r"ஆண்|ஆண\b", all_text):
+            return "Male"
+        if re.search(r"பெண்|பெண\b", all_text):
+            return "Female"
+        if re.search(r"\bmale\b", all_text, re.IGNORECASE):
+            return "Male"
+        if re.search(r"\bfemale\b", all_text, re.IGNORECASE):
+            return "Female"
+        
         for line in lines:
             norm = self._normalize_line(line)
             
             if re.search(combined_pattern, norm, re.IGNORECASE | re.UNICODE):
+                # Look for gender value after the label
                 gender_match = re.search(
                     rf"(?:{combined_pattern})\s*[:\-–—]?\s*(\S+)",
                     norm,
@@ -632,12 +1086,16 @@ class OCRProcessor(BaseProcessor):
                 if gender_match:
                     raw_gender = gender_match.group(1).strip()
                     
+                    # Map to standard gender values
                     for key, value in GENDER_MAP.items():
                         if key.lower() in raw_gender.lower():
                             return value
                     
-                    if raw_gender and len(raw_gender) < 15:
-                        return raw_gender
+                    # Check if it's a Tamil gender word
+                    if "ஆண" in raw_gender:
+                        return "Male"
+                    if "பெண" in raw_gender:
+                        return "Female"
         
         return ""
     

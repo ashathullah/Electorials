@@ -199,11 +199,18 @@ class DocumentMetadata:
         Create DocumentMetadata from AI response.
         
         Maps the AI response structure to our data model.
+        Handles both:
+        - Fresh AI responses with nested 'document_metadata' structure
+        - Already-saved metadata files with top-level fields
         """
         metadata = cls()
         
-        # Document metadata
+        # Document metadata - check nested or top-level
         doc_meta = response_data.get("document_metadata", {})
+        # If document_metadata is empty, try top-level fields (for saved metadata files)
+        if not doc_meta:
+            doc_meta = response_data
+        
         metadata.language_detected = doc_meta.get("language_detected", [])
         metadata.state = doc_meta.get("state", "")
         metadata.electoral_roll_year = doc_meta.get("electoral_roll_year")
@@ -240,8 +247,10 @@ class DocumentMetadata:
             pin_code=addr_data.get("pin_code", ""),
         )
         
-        # Polling details
+        # Polling details - check both field names
         poll_data = response_data.get("part_and_polling_details", {})
+        if not poll_data:
+            poll_data = response_data.get("polling_details", {})
         sections = [
             Section(
                 section_number=str(s.get("section_number", "")),

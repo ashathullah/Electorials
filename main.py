@@ -295,6 +295,9 @@ def process_pdf(
         metadata_extractor = MetadataExtractor(context, force=args.force)
         if metadata_extractor.run() and metadata_extractor.result:
             document.metadata = metadata_extractor.result
+            # Transfer AI usage from context to document stats
+            if context.ai_usage:
+                document.stats.ai_usage = context.ai_usage
             store.save_metadata(context.pdf_name, metadata_extractor.result)
     
     # Step 3: Crop voter boxes
@@ -336,7 +339,7 @@ def process_pdf(
     
     # Finalize
     document.status = "completed"
-    document.stats.total_time_seconds = timer.elapsed
+    document.stats.total_time_sec = timer.elapsed
     
     # Save combined output
     if args.step in ["ocr", "all"]:
@@ -382,8 +385,29 @@ def process_extracted_folder(
     # Load existing metadata if available
     existing_metadata = store.load_metadata(context.pdf_name)
     if existing_metadata:
-        from src.models import DocumentMetadata
-        document.metadata = DocumentMetadata.from_ai_response(existing_metadata)
+        from src.models import DocumentMetadata, AIUsage
+        # Extract AI metadata from the loaded JSON
+        ai_meta = existing_metadata.get("ai_metadata", {})
+        document.metadata = DocumentMetadata.from_ai_response(
+            existing_metadata,
+            ai_provider=ai_meta.get("provider", ""),
+            ai_model=ai_meta.get("model", ""),
+            input_tokens=ai_meta.get("input_tokens", 0),
+            output_tokens=ai_meta.get("output_tokens", 0),
+            cost_usd=ai_meta.get("cost_usd"),
+            extraction_time_sec=ai_meta.get("extraction_time_sec", 0.0),
+        )
+        # Also populate document stats AI usage
+        if ai_meta.get("provider") or ai_meta.get("model"):
+            document.stats.ai_usage = AIUsage(
+                provider=ai_meta.get("provider", ""),
+                model=ai_meta.get("model", ""),
+            )
+            document.stats.ai_usage.add_call(
+                input_tokens=ai_meta.get("input_tokens", 0),
+                output_tokens=ai_meta.get("output_tokens", 0),
+                cost_usd=ai_meta.get("cost_usd"),
+            )
     
     # Step: Crop voter boxes
     if args.step in ["crop", "all"]:
@@ -420,7 +444,7 @@ def process_extracted_folder(
     
     # Finalize
     document.status = "completed"
-    document.stats.total_time_seconds = timer.elapsed
+    document.stats.total_time_sec = timer.elapsed
     
     # Save combined output (only if OCR was run, as crop-only has no voter data)
     if args.step in ["ocr", "all"]:
@@ -469,6 +493,9 @@ def process_metadata_only(
     metadata_extractor = MetadataExtractor(context, force=args.force)
     if metadata_extractor.run() and metadata_extractor.result:
         document.metadata = metadata_extractor.result
+        # Transfer AI usage from context to document stats
+        if context.ai_usage:
+            document.stats.ai_usage = context.ai_usage
         # NOTE: Do NOT call store.save_metadata here!
         # The metadata_extractor already saved the file with AI usage data
     else:
@@ -476,7 +503,7 @@ def process_metadata_only(
     
     # Finalize
     document.status = "completed"
-    document.stats.total_time_seconds = timer.elapsed
+    document.stats.total_time_sec = timer.elapsed
     
     return document
 

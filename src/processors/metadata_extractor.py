@@ -171,8 +171,17 @@ class MetadataExtractor(BaseProcessor):
             encoding="utf-8"
         )
         
-        # Create DocumentMetadata from parsed
-        self.result = DocumentMetadata.from_ai_response(parsed)
+        # Create DocumentMetadata from parsed with AI metadata
+        flattened_ai_meta = self._flatten_ai_metadata(ai_meta)
+        self.result = DocumentMetadata.from_ai_response(
+            parsed,
+            ai_provider=flattened_ai_meta.get("provider", ""),
+            ai_model=flattened_ai_meta.get("model", ""),
+            input_tokens=flattened_ai_meta.get("input_tokens", 0),
+            output_tokens=flattened_ai_meta.get("output_tokens", 0),
+            cost_usd=flattened_ai_meta.get("cost_usd"),
+            extraction_time_sec=flattened_ai_meta.get("extraction_time_sec", 0.0),
+        )
         
         self.log_info(f"Saved metadata to {output_path.name}")
         

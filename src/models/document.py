@@ -242,9 +242,6 @@ class ProcessedDocument:
                 "avg_time_per_voter_ms": round(self.stats.avg_time_per_voter_ms, 2),
             },
             
-            # AI tracking
-            "ai_usage": self.stats.ai_usage.to_dict(),
-            
             # Page summaries
             "pages": [
                 {

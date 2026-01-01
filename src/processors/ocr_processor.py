@@ -123,10 +123,16 @@ class OCRResult:
     elapsed_seconds: float = 0.0
     error: Optional[str] = None
     
-    def to_voter(self, sequence_in_page: int = 0) -> Voter:
+    def to_voter(self, sequence_in_page: int = 0, sequence_in_document: int = 0) -> Voter:
         """Convert to Voter model."""
-        # Use sequence_in_page as serial_no since OCR struggles with reading it
-        serial_no = str(sequence_in_page) if sequence_in_page > 0 else self.serial_no
+        if self.serial_no:
+            serial_no = self.serial_no
+        elif sequence_in_document > 0:
+            serial_no = str(sequence_in_document)
+        elif sequence_in_page > 0:
+            serial_no = str(sequence_in_page)
+        else:
+            serial_no = ""
         
         # Calculate extraction confidence based on field completeness
         fields_present = sum([
@@ -1871,7 +1877,7 @@ class OCRProcessor(BaseProcessor):
                     continue
                 
                 sequence_in_doc += 1
-                voter = ocr_result.to_voter(sequence_in_page=idx)
+                voter = ocr_result.to_voter(sequence_in_page=idx, sequence_in_document=sequence_in_doc)
                 voter.page_id = page_result.page_id
                 voter.sequence_in_document = sequence_in_doc
                 voters.append(voter)

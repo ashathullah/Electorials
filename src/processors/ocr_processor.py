@@ -92,6 +92,18 @@ PHOTO_MARKERS = ["photo", "phot", "available", "புகைப்பட", "ப�
 # Voter separator markers (from voter_end.jpg)
 VOTER_END_MARKERS = ["voter_end", "voter-end", "voterend", "VOTER_END", "VOTER-END", "VOTEREND"]
 
+# Tamil digit to English digit mapping (௦-௯ → 0-9)
+TAMIL_DIGIT_MAP = {
+    "௦": "0", "௧": "1", "௨": "2", "௩": "3", "௪": "4",
+    "௫": "5", "௬": "6", "௭": "7", "௮": "8", "௯": "9",
+}
+
+def convert_tamil_digits(text: str) -> str:
+    """Convert Tamil digits to English digits."""
+    for tamil, english in TAMIL_DIGIT_MAP.items():
+        text = text.replace(tamil, english)
+    return text
+
 
 @dataclass
 class WordBox:
@@ -125,14 +137,8 @@ class OCRResult:
     
     def to_voter(self, sequence_in_page: int = 0, sequence_in_document: int = 0) -> Voter:
         """Convert to Voter model."""
-        if self.serial_no:
-            serial_no = self.serial_no
-        elif sequence_in_document > 0:
-            serial_no = str(sequence_in_document)
-        elif sequence_in_page > 0:
-            serial_no = str(sequence_in_page)
-        else:
-            serial_no = ""
+        # Always use sequence_in_document as serial_no for consistent numbering
+        serial_no = str(sequence_in_document) if sequence_in_document > 0 else ""
         
         # Calculate extraction confidence based on field completeness
         fields_present = sum([
@@ -194,6 +200,8 @@ class OCRProcessor(BaseProcessor):
         dump_raw_ocr: bool = False,
         use_cuda: bool = True,
         use_merged: bool = False,
+        use_tesseract: bool = False,
+        on_page_complete: Optional[callable] = None,
     ):
         """
         Initialize OCR processor.
@@ -205,6 +213,8 @@ class OCRProcessor(BaseProcessor):
             dump_raw_ocr: Dump raw OCR text for debugging
             use_cuda: Enable CUDA for Tamil OCR (if available)
             use_merged: Use merged images from /merged folder for faster processing
+            use_tesseract: Use Tesseract OCR instead of ocr_tamil (faster on CPU)
+            on_page_complete: Callback(page_id, voters, page_time) called after each page
         """
         super().__init__(context)
         self.languages = languages
@@ -212,18 +222,27 @@ class OCRProcessor(BaseProcessor):
         self.dump_raw_ocr = dump_raw_ocr
         self.use_cuda = use_cuda
         self.use_merged = use_merged
+        self.use_tesseract = use_tesseract
         self.ocr_config = self.config.ocr  # Contains ROI configs
         self.page_results: List[PageOCRResult] = []
         self._ocr_initialized = False
+        self.on_page_complete = on_page_complete
         
         # Merged images directory - inside extracted folder
         self.merged_dir = self.context.extracted_dir / "merged" if self.context.extracted_dir else None
     
     def validate(self) -> bool:
         """Validate prerequisites."""
-        if not TAMIL_OCR_AVAILABLE:
-            self.log_error("Tamil OCR not available. Install: pip install ocr-tamil")
-            return False
+        # Check OCR availability based on selected engine
+        if self.use_tesseract:
+            if not TESSERACT_AVAILABLE:
+                self.log_error("Tesseract OCR not available. Install: pip install pytesseract")
+                return False
+            self.log_info("Using Tesseract OCR (faster on CPU)")
+        else:
+            if not TAMIL_OCR_AVAILABLE:
+                self.log_error("Tamil OCR not available. Install: pip install ocr-tamil")
+                return False
         
         # For merged mode, check merged directory
         if self.use_merged:
@@ -244,8 +263,14 @@ class OCRProcessor(BaseProcessor):
         return True
     
     def _initialize_ocr(self) -> None:
-        """Initialize Tamil OCR engine (singleton pattern)."""
+        """Initialize OCR engine (singleton pattern for Tamil OCR)."""
         if self._ocr_initialized:
+            return
+        
+        # Skip Tamil OCR initialization if using Tesseract
+        if self.use_tesseract:
+            self._initialize_tesseract()
+            self._ocr_initialized = True
             return
         
         if OCRProcessor._ocr_instance is None:
@@ -267,6 +292,23 @@ class OCRProcessor(BaseProcessor):
                 raise OCRProcessingError(f"Failed to initialize Tamil OCR: {e}")
         
         self._ocr_initialized = True
+    
+    def _initialize_tesseract(self) -> None:
+        """Initialize Tesseract OCR."""
+        import os
+        if os.name == "nt":
+            tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if Path(tesseract_path).exists():
+                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+                self.log_info(f"Using Tesseract from: {tesseract_path}")
+        
+        try:
+            version = pytesseract.get_tesseract_version()
+            self.log_info(f"Tesseract version: {version}")
+        except Exception as e:
+            raise OCRProcessingError(f"Tesseract not available: {e}")
+        
+        self.log_info(f"Tesseract initialized (CPU mode, languages: {self.languages})")
     
     @property
     def ocr(self) -> 'TamilOCR':
@@ -311,12 +353,27 @@ class OCRProcessor(BaseProcessor):
         self.log_info(f"Found {len(page_dirs)} page(s) with crops")
         
         total_images = 0
+        total_voters = 0
         
         for page_dir in page_dirs:
             result = self._process_page(page_dir)
             self.page_results.append(result)
             total_images += result.images_processed
+            total_voters += len(result.records)
             self.context.total_voters_found += len(result.records)
+            
+            # Call page complete callback for immediate saving
+            if self.on_page_complete:
+                page_voters = []
+                for idx, ocr_result in enumerate(result.records, start=1):
+                    if not ocr_result.error:
+                        voter = ocr_result.to_voter(
+                            sequence_in_page=idx,
+                            sequence_in_document=total_voters - len(result.records) + idx
+                        )
+                        voter.page_id = result.page_id
+                        page_voters.append(voter)
+                self.on_page_complete(result.page_id, page_voters, result.total_seconds)
         
         self.log_info(f"OCR complete: {total_images} images processed")
         
@@ -396,6 +453,20 @@ class OCRProcessor(BaseProcessor):
             total_voters += len(page_records)
             self.context.total_voters_found += len(page_records)
             
+            # Call page complete callback for immediate saving
+            if self.on_page_complete:
+                # Convert OCR results to Voters for the callback
+                page_voters = []
+                for idx, ocr_result in enumerate(page_records, start=1):
+                    if not ocr_result.error:
+                        voter = ocr_result.to_voter(
+                            sequence_in_page=idx,
+                            sequence_in_document=total_voters - len(page_records) + idx
+                        )
+                        voter.page_id = page_id
+                        page_voters.append(voter)
+                self.on_page_complete(page_id, page_voters, page_time)
+            
             self.log_info(f"Processed {page_id}: {len(page_records)} voters from {len(batch_images)} batch(es)")
         
         self.log_info(f"OCR complete (merged batches): {total_voters} voters from {total_batches} batches")
@@ -473,37 +544,68 @@ class OCRProcessor(BaseProcessor):
         except ValueError:
             batch_offset = 0
             
-        # 2. Batch OCR Inference (No I/O)
+        # 2. OCR Inference - use batch for Tamil OCR, sequential for Tesseract
         batch_start = time.perf_counter()
-        try:
-            # Pass list of numpy arrays directly to OCR engine
-            ocr_results = self.ocr.predict(valid_segments)
-        except Exception as e:
-            self.log_error(f"Batch OCR failed: {e}")
-            return []
-            
-        inference_time = time.perf_counter() - batch_start
-        self.log_debug(f"Batch inference for {len(valid_segments)} segments took {inference_time:.4f}s")
-        
-        # 3. Process Results
         records: List[OCRResult] = []
         
-        for i, ocr_output in enumerate(ocr_results):
-            idx = valid_indices[i]
-            segment = valid_segments[i]
-            voter_num = batch_offset + idx
-            image_name = f"{page_id}-{voter_num:03d}.png"
+        if self.use_tesseract:
+            # Tesseract: process each segment sequentially
+            for i, segment in enumerate(valid_segments):
+                idx = valid_indices[i]
+                voter_num = batch_offset + idx
+                image_name = f"{page_id}-{voter_num:03d}.png"
+                
+                # Run Tesseract OCR on this segment
+                lines = self._run_tesseract_ocr_on_segment(segment)
+                
+                # Process the result
+                result = self._process_voter_result_from_lines(segment, lines, image_name)
+                
+                # Retry age extraction from individual crop if invalid
+                if not self._is_valid_age(result.age):
+                    retry_age = self._retry_age_from_crop(page_id, image_name)
+                    if retry_age:
+                        result.age = retry_age
+                
+                self.log_debug(f"Processed {image_name} in {result.elapsed_seconds:.4f}s")
+                records.append(result)
             
-            # Use total batch time / count as approximate per-item time
-            approx_time = inference_time / len(valid_segments)
+            inference_time = time.perf_counter() - batch_start
+            self.log_debug(f"Tesseract inference for {len(valid_segments)} segments took {inference_time:.4f}s")
+        else:
+            # Tamil OCR: batch inference (faster)
+            try:
+                ocr_results = self.ocr.predict(valid_segments)
+            except Exception as e:
+                self.log_error(f"Batch OCR failed: {e}")
+                return []
+                
+            inference_time = time.perf_counter() - batch_start
+            self.log_debug(f"Batch inference for {len(valid_segments)} segments took {inference_time:.4f}s")
             
-            result = self._process_voter_result_from_ocr(segment, ocr_output, image_name)
-            
-            # Adjust reported time to include inference overhead
-            result.elapsed_seconds += approx_time
-            
-            self.log_debug(f"Processed {image_name} in {result.elapsed_seconds:.4f}s")
-            records.append(result)
+            # 3. Process Results
+            for i, ocr_output in enumerate(ocr_results):
+                idx = valid_indices[i]
+                segment = valid_segments[i]
+                voter_num = batch_offset + idx
+                image_name = f"{page_id}-{voter_num:03d}.png"
+                
+                # Use total batch time / count as approximate per-item time
+                approx_time = inference_time / len(valid_segments)
+                
+                result = self._process_voter_result_from_ocr(segment, ocr_output, image_name)
+                
+                # Retry age extraction from individual crop if invalid
+                if not self._is_valid_age(result.age):
+                    retry_age = self._retry_age_from_crop(page_id, image_name)
+                    if retry_age:
+                        result.age = retry_age
+                
+                # Adjust reported time to include inference overhead
+                result.elapsed_seconds += approx_time
+                
+                self.log_debug(f"Processed {image_name} in {result.elapsed_seconds:.4f}s")
+                records.append(result)
         
         return records
 
@@ -599,6 +701,89 @@ class OCRProcessor(BaseProcessor):
             lines.insert(0, "__RAW__:" + "|".join(words))
             
         return lines, "".join(lines)
+    
+    def _is_valid_age(self, age: str) -> bool:
+        """
+        Check if extracted age is valid.
+        
+        Age is invalid if:
+        - Empty or missing
+        - Single digit (likely OCR error - ages should be 2+ digits for adults)
+        - Outside reasonable range (18-120 for voters)
+        """
+        if not age:
+            return False
+        
+        try:
+            age_val = int(age)
+            # Single digit ages are likely OCR errors (voters are typically 18+)
+            if age_val < 10:
+                return False
+            # Valid voter age range
+            return 18 <= age_val <= 120
+        except ValueError:
+            return False
+    
+    def _retry_age_from_crop(self, page_id: str, image_name: str) -> str:
+        """
+        Retry age extraction from individual crop image.
+        
+        Used when merged image OCR fails to extract valid age.
+        Falls back to /crops folder for individual voter images.
+        
+        Args:
+            page_id: Page identifier (e.g., 'page-004')
+            image_name: Image name (e.g., 'page-004-001.png')
+            
+        Returns:
+            Extracted age string, or empty string if not found
+        """
+        if not self.context.crops_dir:
+            return ""
+        
+        # Find the individual crop image
+        # Structure: crops/<page_id>/images/<image_name>
+        crop_path = self.context.crops_dir / page_id / "images" / image_name
+        
+        if not crop_path.exists():
+            # Try without 'images' subdirectory
+            crop_path = self.context.crops_dir / page_id / image_name
+        
+        if not crop_path.exists():
+            self.log_debug(f"Crop image not found for age retry: {crop_path}")
+            return ""
+        
+        self.log_debug(f"Retrying age extraction from individual crop: {crop_path}")
+        
+        try:
+            # Load the individual crop image
+            img_bgr = cv2.imdecode(
+                np.fromfile(str(crop_path), dtype=np.uint8),
+                cv2.IMREAD_COLOR
+            )
+            
+            if img_bgr is None:
+                return ""
+            
+            # Run OCR on the individual image
+            if self.use_tesseract:
+                lines = self._run_tesseract_ocr(crop_path, img_bgr)
+            else:
+                lines = self._run_tamil_ocr(crop_path, img_bgr)
+            
+            # Extract age from the OCR result
+            age = self._extract_age(lines)
+            
+            if self._is_valid_age(age):
+                self.log_debug(f"Age retry successful: {age}")
+                return age
+            else:
+                self.log_debug(f"Age retry failed, got: '{age}'")
+                return ""
+                
+        except Exception as e:
+            self.log_debug(f"Age retry error: {e}")
+            return ""
 
     def _split_by_voter_end(self, text: str) -> List[str]:
         """Split OCR text by voter_end markers."""
@@ -878,7 +1063,7 @@ class OCRProcessor(BaseProcessor):
         Uses hybrid extraction:
         1. EPIC via ROI extraction
         2. Serial via ROI extraction
-        3. Other fields via Tamil OCR for better Tamil text recognition
+        3. Other fields via Tamil OCR or Tesseract (based on use_tesseract flag)
         """
         start_time = time.perf_counter()
         
@@ -896,10 +1081,13 @@ class OCRProcessor(BaseProcessor):
             return result
         
         try:
-            # Full OCR using Tamil OCR for better Tamil text
-            lines = self._run_tamil_ocr(image_path, img_bgr)
+            # Full OCR - use Tesseract or Tamil OCR based on flag
+            if self.use_tesseract:
+                lines = self._run_tesseract_ocr(image_path, img_bgr)
+            else:
+                lines = self._run_tamil_ocr(image_path, img_bgr)
             
-            # Extract EPIC from ROI
+            # Extract EPIC from ROI (always uses Tesseract if available for best results)
             result.epic_no = self._extract_epic(img_bgr)
             result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
             
@@ -917,6 +1105,180 @@ class OCRProcessor(BaseProcessor):
             result.error = str(e)
             self.log_debug(f"OCR error for {image_path.name}: {e}")
         
+        result.elapsed_seconds = time.perf_counter() - start_time
+        return result
+    
+    def _run_tesseract_ocr(self, image_path: Path, img_bgr: np.ndarray) -> List[str]:
+        """
+        Run Tesseract OCR on image and return lines.
+        
+        Tesseract is faster on CPU compared to Tamil OCR (which uses deep learning models).
+        Uses image_to_data for word-level extraction with position info.
+        """
+        try:
+            # Open image with PIL for Tesseract
+            pil_img = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+            
+            # Run OCR with word-level data
+            config = "--oem 1 --psm 6"
+            data = pytesseract.image_to_data(
+                pil_img, 
+                lang=self.languages, 
+                config=config, 
+                output_type=Output.DICT
+            )
+            
+            # Parse into lines
+            lines = []
+            raw_words = []
+            
+            # Get the dictionary from the data
+            n = len(data.get("text", []))
+            current_line_num = -1
+            current_line_words = []
+            
+            for i in range(n):
+                txt = (data["text"][i] or "").strip()
+                if not txt:
+                    continue
+                    
+                conf = int(float(data.get("conf", [-1])[i]))
+                if conf != -1 and conf < 20:
+                    continue
+                
+                line_num = data.get("line_num", [0])[i]
+                raw_words.append(txt)
+                
+                # Group by line
+                if line_num != current_line_num:
+                    if current_line_words:
+                        lines.append(" ".join(current_line_words))
+                    current_line_words = [txt]
+                    current_line_num = line_num
+                else:
+                    current_line_words.append(txt)
+            
+            # Add last line
+            if current_line_words:
+                lines.append(" ".join(current_line_words))
+            
+            # Add raw words as special line for alternative parsing
+            if raw_words:
+                lines.insert(0, "__RAW__:" + "|".join(raw_words))
+            
+            if self.dump_raw_ocr:
+                self.log_debug(f"Tesseract raw: {raw_words}")
+            
+            return lines
+            
+        except Exception as e:
+            self.log_debug(f"Tesseract OCR error: {e}")
+            return []
+    
+    def _run_tesseract_ocr_on_segment(self, segment: np.ndarray) -> List[str]:
+        """
+        Run Tesseract OCR on a numpy array segment directly.
+        
+        Similar to _run_tesseract_ocr but takes a numpy array instead of file path.
+        """
+        try:
+            # Convert BGR to RGB for PIL
+            pil_img = Image.fromarray(cv2.cvtColor(segment, cv2.COLOR_BGR2RGB))
+            
+            # Run OCR with word-level data
+            config = "--oem 1 --psm 6"
+            data = pytesseract.image_to_data(
+                pil_img, 
+                lang=self.languages, 
+                config=config, 
+                output_type=Output.DICT
+            )
+            
+            # Parse into lines
+            lines = []
+            raw_words = []
+            
+            n = len(data.get("text", []))
+            current_line_num = -1
+            current_line_words = []
+            
+            for i in range(n):
+                txt = (data["text"][i] or "").strip()
+                if not txt:
+                    continue
+                    
+                conf = int(float(data.get("conf", [-1])[i]))
+                if conf != -1 and conf < 20:
+                    continue
+                
+                line_num = data.get("line_num", [0])[i]
+                raw_words.append(txt)
+                
+                if line_num != current_line_num:
+                    if current_line_words:
+                        lines.append(" ".join(current_line_words))
+                    current_line_words = [txt]
+                    current_line_num = line_num
+                else:
+                    current_line_words.append(txt)
+            
+            if current_line_words:
+                lines.append(" ".join(current_line_words))
+            
+            if raw_words:
+                lines.insert(0, "__RAW__:" + "|".join(raw_words))
+            
+            return lines
+            
+        except Exception as e:
+            self.log_debug(f"Tesseract OCR on segment error: {e}")
+            return []
+    
+    def _process_voter_result_from_lines(
+        self, 
+        segment: np.ndarray, 
+        lines: List[str],
+        image_name: str
+    ) -> OCRResult:
+        """
+        Process a single voter result from pre-computed OCR lines.
+        
+        Similar to _process_voter_result_from_ocr but takes parsed lines instead of raw OCR output.
+        """
+        start_time = time.perf_counter()
+        result = OCRResult(image_name=image_name)
+        
+        try:
+            # Reconstruct full text for EPIC extraction
+            full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
+            
+            # Try to extract EPIC from full text first
+            epic_found_in_text = False
+            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+            if match:
+                result.epic_no = match.group(1)
+                result.epic_valid = True
+                epic_found_in_text = True
+            
+            if not epic_found_in_text:
+                # Fallback to ROI extraction
+                result.epic_no = self._extract_epic(segment)
+                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+            
+            # Extract Serial from ROI
+            result.serial_no = self._extract_serial(segment)
+            
+            # Extract fields from lines
+            result.name = self._extract_name(lines)
+            result.relation_type, result.relation_name = self._extract_relation(lines)
+            result.house_no = self._extract_house(lines, segment)
+            result.age = self._extract_age(lines)
+            result.gender = self._extract_gender(lines)
+            
+        except Exception as e:
+            result.error = str(e)
+            self.log_debug(f"Extraction error for {image_name}: {e}")
+            
         result.elapsed_seconds = time.perf_counter() - start_time
         return result
     
@@ -1361,9 +1723,27 @@ class OCRProcessor(BaseProcessor):
                         # Clean the name before returning
                         full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
                         return full_name.strip()
-                    # Tamil name
-                    name_word = re.sub(r'^[:\-–—;,ஃ\s]+', '', name_word)
-                    return name_word.strip()
+                    # Tamil name - try to get full name (2-3 words like ராட்ாம செல்வம், ஹாஜா நிஜா மைஹைதீன)
+                    full_tamil_name = name_word
+                    for j in range(name_start_idx + 1, min(name_start_idx + 4, len(words))):
+                        extra_word = words[j].strip().rstrip(",;:ஃ%&")
+                        extra_lower = extra_word.lower()
+                        # Stop if we hit a marker
+                        if any(m in extra_lower for m in skip_markers + relation_markers):
+                            break
+                        if extra_word.startswith("-") or extra_word.startswith(":"):
+                            break
+                        # Check if it's a Tamil word (has Tamil characters)
+                        if extra_word and re.search(r'[\u0B80-\u0BFF]', extra_word):
+                            # Skip if it's a label word like பெயர்
+                            if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு"]):
+                                break
+                            full_tamil_name += " " + extra_word
+                        else:
+                            break
+                    # Clean the name before returning
+                    full_tamil_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_tamil_name)
+                    return full_tamil_name.strip()
         
         return ""
     
@@ -1402,7 +1782,12 @@ class OCRProcessor(BaseProcessor):
                         # Apply final cleaning to remove leading colons
                         value = self._clean_extracted_value(value)
                         
-                        if value and len(value) > 1:
+                        # Skip if the extracted value is just a label word (e.g., "பயர்" corrupted from "பெயர்")
+                        name_label_words = ["பெயர்", "பெயர", "பயர்", "பயர", "யர்", "யர", "name", "பேர்", "பேர"]
+                        is_label = any(label.lower() in value.lower() for label in name_label_words) if value else True
+                        is_too_short = len(value) <= 3 if value else True
+                        
+                        if value and len(value) > 1 and not (is_label and is_too_short):
                             return rel_type, value
         
         return "", ""
@@ -1443,6 +1828,22 @@ class OCRProcessor(BaseProcessor):
         skip_markers_english = ["photo", "house", "age", "gender", "address", "no", "number"]
         skip_markers = skip_markers_tamil + skip_markers_english
         
+        # Label words that should NOT be extracted as names (e.g., "பெயர்" = "name")
+        # These often get corrupted by OCR to "பயர்", "யர்", etc.
+        name_label_words = ["பெயர்", "பெயர", "பயர்", "பயர", "யர்", "யர", "name", "பேர்", "பேர"]
+        
+        def is_name_label(word: str) -> bool:
+            """Check if word looks like a label word (not an actual name)."""
+            word_clean = word.strip().rstrip(",;:ஃ%&").lower()
+            # Check exact match or near match for name labels
+            for label in name_label_words:
+                if word_clean == label.lower() or label.lower() in word_clean:
+                    return True
+            # Very short words that are likely corrupted labels
+            if len(word_clean) <= 3 and re.search(r'[\u0B80-\u0BFF]', word_clean):
+                return True
+            return False
+        
         # If we found a relation type, look for the name after the name marker
         if relation_type and found_relation_idx >= 0:
             # Look for பெயர் or "name" after the relation marker
@@ -1454,10 +1855,27 @@ class OCRProcessor(BaseProcessor):
                 
                 if is_tamil_name or is_english_name:
                     # The next word(s) should be the name
+                    # First check for name attached after colon like "பெயர்:மணி"
+                    if ":" in word:
+                        name_after_colon = word.split(":", 1)[-1].strip().rstrip(",;ஃ%&-")
+                        if name_after_colon and re.search(r'[\u0B80-\u0BFF]', name_after_colon):
+                            relation_name = name_after_colon.strip()
+                            break
+                    
                     if i + 1 < len(words):
-                        name_word = words[i + 1].strip().rstrip(",;:ஃ%&")
-                        # Skip if it's another marker
-                        if name_word and not any(m.lower() in name_word.lower() for m in skip_markers):
+                        name_word = words[i + 1].strip()
+                        
+                        # Handle case where name starts with colon ":மணி"
+                        name_word = name_word.lstrip(":").strip()
+                        name_word = name_word.rstrip(",;:ஃ%&")
+                        
+                        # Skip dash-only words, try next word
+                        if name_word == "-" or name_word == "–" or name_word == "—":
+                            if i + 2 < len(words):
+                                name_word = words[i + 2].strip().lstrip(":").rstrip(",;:ஃ%&")
+                        
+                        # Skip if it's another marker OR if it's a label word
+                        if name_word and not any(m.lower() in name_word.lower() for m in skip_markers) and not is_name_label(name_word):
                             # For English names, try to get full name (multiple words)
                             has_english = re.search(r'[A-Za-z]', name_word)
                             has_tamil = re.search(r'[\u0B80-\u0BFF]', name_word)
@@ -1478,9 +1896,29 @@ class OCRProcessor(BaseProcessor):
                                 full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
                                 relation_name = full_name.strip()
                             else:
+                                # Tamil relation name - try to get full name (2-3 words)
+                                full_tamil_rel = name_word
+                                start_idx = i + 2
+                                # If we skipped a dash, start from i + 3
+                                if i + 1 < len(words) and words[i + 1].strip() in ["-", "–", "—"]:
+                                    start_idx = i + 3
+                                for k in range(start_idx, min(start_idx + 3, len(words))):
+                                    extra_word = words[k].strip().rstrip(",;:ஃ%&")
+                                    if any(m.lower() in extra_word.lower() for m in skip_markers):
+                                        break
+                                    if extra_word.startswith("-") or extra_word.startswith(":"):
+                                        break
+                                    # Check if it's a Tamil word
+                                    if extra_word and re.search(r'[\u0B80-\u0BFF]', extra_word):
+                                        # Skip label words
+                                        if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு"]):
+                                            break
+                                        full_tamil_rel += " " + extra_word
+                                    else:
+                                        break
                                 # Clean leading colons from Tamil name
-                                name_word = re.sub(r'^[:\-–—;,ஃ\s]+', '', name_word)
-                                relation_name = name_word.strip()
+                                full_tamil_rel = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_tamil_rel)
+                                relation_name = full_tamil_rel.strip()
                             break
             
             # If no name found after name marker, try direct value after relation type
@@ -1489,8 +1927,11 @@ class OCRProcessor(BaseProcessor):
                 for i in range(found_relation_idx + 1, min(found_relation_idx + 4, len(words))):
                     word = words[i].strip().rstrip(",;:ஃ%&")
                     word_lower = word.lower()
-                    # Skip "name" keyword and markers
+                    # Skip "name" keyword, markers, and label words
                     if word_lower in ["name", "name:", "'s"] or any(m.lower() in word_lower for m in skip_markers):
+                        continue
+                    # Skip if it's a label word (e.g., "பயர்" = corrupted "பெயர்")
+                    if is_name_label(word):
                         continue
                     # Check if it's a valid name (has letters, not a marker)
                     if word and re.match(r'^[A-Za-z\u0B80-\u0BFF]', word):
@@ -1513,9 +1954,25 @@ class OCRProcessor(BaseProcessor):
                                 full_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_name)
                                 relation_name = full_name.strip()
                             else:
+                                # Tamil relation name - try to get full name (2-3 words)
+                                full_tamil_rel = word
+                                for k in range(i + 1, min(i + 4, len(words))):
+                                    extra_word = words[k].strip().rstrip(",;:ஃ%&")
+                                    if any(m.lower() in extra_word.lower() for m in skip_markers + ["name", "'s"]):
+                                        break
+                                    if extra_word.startswith("-") or extra_word.startswith(":"):
+                                        break
+                                    # Check if it's a Tamil word
+                                    if extra_word and re.search(r'[\u0B80-\u0BFF]', extra_word):
+                                        # Skip label words
+                                        if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு"]):
+                                            break
+                                        full_tamil_rel += " " + extra_word
+                                    else:
+                                        break
                                 # Clean leading colons from Tamil name
-                                word = re.sub(r'^[:\-–—;,ஃ\s]+', '', word)
-                                relation_name = word.strip()
+                                full_tamil_rel = re.sub(r'^[:\-–—;,ஃ\s]+', '', full_tamil_rel)
+                                relation_name = full_tamil_rel.strip()
                             break
         
         # If no explicit relation type found, check if there's a second name pattern
@@ -1573,6 +2030,8 @@ class OCRProcessor(BaseProcessor):
                 words = line[8:].split("|")
                 house = self._extract_house_from_words(words)
                 if house:
+                    # Convert Tamil digits and clean
+                    house = convert_tamil_digits(house)
                     return house
         
         combined_pattern = r"(?:" + "|".join(HOUSE_PATTERNS) + r")"
@@ -1586,7 +2045,7 @@ class OCRProcessor(BaseProcessor):
                 # Try direct extraction with single colon/separator
                 # Pattern: வீட்டு எண் : 1 or house no : 1
                 direct_match = re.search(
-                    rf"(?:{combined_pattern})\s*[:\-–—]\s*(\d[\dA-Za-z/\-]*)",
+                    rf"(?:{combined_pattern})\s*[:\-–—]\s*([A-Za-z]?\d[\dA-Za-z/\-]*)",
                     norm,
                     re.IGNORECASE | re.UNICODE
                 )
@@ -1594,7 +2053,7 @@ class OCRProcessor(BaseProcessor):
                     house_val = direct_match.group(1).strip()
                     # Clean up any trailing noise
                     house_val = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", house_val, flags=re.IGNORECASE)
-                    house_val = house_val.strip()
+                    house_val = convert_tamil_digits(house_val.strip())
                     if house_val and len(house_val) <= 15:
                         return house_val
                 
@@ -1602,8 +2061,9 @@ class OCRProcessor(BaseProcessor):
                 value = self._extract_value_after_colon(line, combined_pattern)
                 value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", value, flags=re.IGNORECASE)
                 value = re.sub(r"\s+", "", value)
+                value = convert_tamil_digits(value)
                 
-                house_match = re.search(r"^(\d[\dA-Za-z/\-]{0,15})", value)
+                house_match = re.search(r"^([A-Za-z]?\d[\dA-Za-z/\-]{0,15})", value)
                 if house_match:
                     return house_match.group(1)
                 
@@ -1696,7 +2156,10 @@ class OCRProcessor(BaseProcessor):
             except Exception:
                 txt = ""
         
-        # Clean house value
+        # Convert Tamil digits first
+        txt = convert_tamil_digits(txt)
+        
+        # Clean house value - preserve letters and numbers
         s = txt.upper()
         s = re.sub(r"[^A-Z0-9/\-\s]", " ", s)
         s = s.replace("O", "0").replace("I", "1")
@@ -1706,12 +2169,27 @@ class OCRProcessor(BaseProcessor):
         for t in tokens:
             if not re.search(r"\d", t):
                 continue
-            # House numbers are typically short - max 6 chars for ROI extraction
-            # Reject values that look like PIN codes (6 digits starting with 6)
-            if len(t) >= 6 and t.isdigit() and t.startswith("6"):
-                continue  # Skip PIN codes
-            if len(t) <= 6 and re.fullmatch(r"^\d[\dA-Z/\-]{0,5}$", t):
-                return t
+            
+            # Check for valid alphanumeric patterns first (e.g., D35-1, A1, 123A)
+            # Pattern: optional letter prefix + digits + optional suffix
+            alpha_match = re.match(r"^([A-Z]?\d+[A-Z]?[-/]?\d*)$", t)
+            if alpha_match:
+                cleaned = alpha_match.group(1)
+                # Reject PIN codes (6 digits starting with 6)
+                if len(cleaned) >= 6 and cleaned.isdigit() and cleaned.startswith("6"):
+                    continue
+                if len(cleaned) <= 10:
+                    return cleaned
+            
+            # Fallback: Extract longest digit sequence for pure noise patterns
+            # like "6L283", "6GL324"
+            digit_sequences = re.findall(r"\d+", t)
+            if digit_sequences:
+                cleaned = max(digit_sequences, key=len)
+                if len(cleaned) >= 6 and cleaned.startswith("6"):
+                    continue  # Skip PIN codes
+                if len(cleaned) <= 4:
+                    return cleaned
         
         return ""
     

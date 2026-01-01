@@ -96,7 +96,8 @@ class JSONStore:
         pdf_name: str,
         page_id: str,
         voters: List[Voter],
-        extra_data: Optional[dict[str, Any]] = None
+        extra_data: Optional[dict[str, Any]] = None,
+        page_processing_seconds: Optional[float] = None,
     ) -> Path:
         """
         Save page-wise voter data.
@@ -106,6 +107,7 @@ class JSONStore:
             page_id: Page identifier
             voters: List of voters on this page
             extra_data: Additional data to include
+            page_processing_seconds: How long the page took to process
         
         Returns:
             Path to saved file
@@ -117,8 +119,12 @@ class JSONStore:
             "file": pdf_name,
             "page": page_id,
             "generated_at_epoch": int(datetime.utcnow().timestamp()),
+            "page_processing_seconds": round(page_processing_seconds, 3) if page_processing_seconds is not None else None,
             "records": [v.to_dict() for v in voters],
         }
+        
+        # Remove None values
+        data = {k: v for k, v in data.items() if v is not None}
         
         if extra_data:
             data.update(extra_data)

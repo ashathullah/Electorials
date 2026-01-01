@@ -210,10 +210,19 @@ def parse_args() -> argparse.Namespace:
         help="Dump raw OCR text for debugging",
     )
     
+    # OCR mode flags (merged + tesseract are now defaults)
     parser.add_argument(
-        "--use-merged",
+        "--use-crops",
         action="store_true",
-        help="Use merged images for OCR (faster processing). Requires running merge step first.",
+        dest="use_crops",
+        help="Use individual crop images instead of merged batches (slower but may be more accurate).",
+    )
+    
+    parser.add_argument(
+        "--use-tamil-ocr",
+        action="store_true",
+        dest="use_tamil_ocr",
+        help="Use Tamil OCR (ocr_tamil) instead of Tesseract (requires GPU for best performance).",
     )
     
     return parser.parse_args()
@@ -332,27 +341,29 @@ def process_pdf(
     if args.step in ["ocr", "all"]:
         logger.info("Step 5: Running OCR extraction...")
         
+        # Define callback for immediate page saving
+        def save_page_callback(page_id: str, page_voters: list, page_time: float):
+            page_path = store.save_page(
+                context.pdf_name, 
+                page_id, 
+                page_voters,
+                page_processing_seconds=page_time
+            )
+            logger.info(f"Saved page {page_id}: {len(page_voters)} voters in {page_time:.2f}s")
+        
         ocr_processor = OCRProcessor(
             context,
             languages=args.languages,
             dump_raw_ocr=args.dump_raw_ocr,
-            use_merged=args.use_merged,
+            use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
+            use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
+            on_page_complete=save_page_callback,
         )
         
         if ocr_processor.run():
             voters = ocr_processor.get_all_voters()
             document.add_voters(voters)
             logger.info(f"Extracted {len(voters)} voter records")
-            
-            # Save page-wise data
-            from collections import defaultdict
-            voters_by_page = defaultdict(list)
-            for voter in voters:
-                voters_by_page[voter.page_id].append(voter)
-            
-            for page_id, page_voters in voters_by_page.items():
-                page_path = store.save_page(context.pdf_name, page_id, page_voters)
-                logger.debug(f"Saved page data: {page_path}")
         else:
             logger.warning("OCR processing failed")
     
@@ -451,27 +462,29 @@ def process_extracted_folder(
     if args.step in ["ocr", "all"]:
         logger.info("Running OCR extraction...")
         
+        # Define callback for immediate page saving
+        def save_page_callback(page_id: str, page_voters: list, page_time: float):
+            page_path = store.save_page(
+                context.pdf_name, 
+                page_id, 
+                page_voters,
+                page_processing_seconds=page_time
+            )
+            logger.info(f"Saved page {page_id}: {len(page_voters)} voters in {page_time:.2f}s")
+        
         ocr_processor = OCRProcessor(
             context,
             languages=args.languages,
             dump_raw_ocr=args.dump_raw_ocr,
-            use_merged=args.use_merged,
+            use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
+            use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
+            on_page_complete=save_page_callback,
         )
         
         if ocr_processor.run():
             voters = ocr_processor.get_all_voters()
             document.add_voters(voters)
             logger.info(f"Extracted {len(voters)} voter records")
-            
-            # Save page-wise data
-            from collections import defaultdict
-            voters_by_page = defaultdict(list)
-            for voter in voters:
-                voters_by_page[voter.page_id].append(voter)
-            
-            for page_id, page_voters in voters_by_page.items():
-                page_path = store.save_page(context.pdf_name, page_id, page_voters)
-                logger.debug(f"Saved page data: {page_path}")
     
     # Finalize
     document.status = "completed"

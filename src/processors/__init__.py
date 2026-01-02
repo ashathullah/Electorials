@@ -7,6 +7,7 @@ Contains all processing components for the Electoral Roll pipeline:
 - ImageCropper: Crop voter boxes from page images
 - ImageMerger: Merge cropped images for batch OCR
 - OCRProcessor: Extract voter data from cropped images
+- HeaderExtractor: Extract page header metadata (assembly, section, part)
 """
 
 from .base import BaseProcessor, ProcessingContext
@@ -15,6 +16,7 @@ from .metadata_extractor import MetadataExtractor
 from .image_cropper import ImageCropper
 from .image_merger import ImageMerger
 from .ocr_processor import OCRProcessor
+from .header_extractor import HeaderExtractor
 
 __all__ = [
     "BaseProcessor",
@@ -24,4 +26,5 @@ __all__ = [
     "ImageCropper",
     "ImageMerger",
     "OCRProcessor",
+    "HeaderExtractor",
 ]

@@ -70,6 +70,7 @@ from src.processors import (
     ImageCropper,
     ImageMerger,
     OCRProcessor,
+    HeaderExtractor,
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
 from src.utils.timing import Timer
@@ -146,9 +147,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "merge", "ocr", "all"],
+        choices=["extract", "metadata", "crop", "header", "merge", "ocr", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'merge' combines cropped images with voter_end separators.",
+        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part).",
     )
     
     parser.add_argument(
@@ -326,6 +327,18 @@ def process_pdf(
         elif cropper.summary:
             logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
     
+    # Step 3.5: Extract page header metadata
+    header_data = {}
+    if args.step in ["header", "crop", "all"]:
+        logger.info("Step 3.5: Extracting page header metadata...")
+        
+        header_extractor = HeaderExtractor(context, languages=args.languages)
+        if header_extractor.run():
+            header_data = header_extractor.get_all_headers()
+            logger.info(f"Extracted headers from {len(header_data)} pages")
+        else:
+            logger.warning("Header extraction failed or no headers found")
+    
     # Step 4: Merge cropped images
     if args.step in ["merge", "all"]:
         logger.info("Step 4: Merging cropped images...")
@@ -362,7 +375,7 @@ def process_pdf(
         
         if ocr_processor.run():
             voters = ocr_processor.get_all_voters()
-            document.add_voters(voters)
+            document.add_voters(voters, header_data=header_data)
             logger.info(f"Extracted {len(voters)} voter records")
         else:
             logger.warning("OCR processing failed")
@@ -447,6 +460,18 @@ def process_extracted_folder(
         if cropper.run() and cropper.summary:
             logger.info(f"Cropped {cropper.summary.total_crops} voter boxes")
     
+    # Step: Extract page header metadata
+    header_data = {}
+    if args.step in ["header", "crop", "all"]:
+        logger.info("Extracting page header metadata...")
+        
+        header_extractor = HeaderExtractor(context, languages=args.languages)
+        if header_extractor.run():
+            header_data = header_extractor.get_all_headers()
+            logger.info(f"Extracted headers from {len(header_data)} pages")
+        else:
+            logger.warning("Header extraction failed or no headers found")
+    
     # Step: Merge cropped images
     if args.step in ["merge", "all"]:
         logger.info("Merging cropped images...")
@@ -483,7 +508,7 @@ def process_extracted_folder(
         
         if ocr_processor.run():
             voters = ocr_processor.get_all_voters()
-            document.add_voters(voters)
+            document.add_voters(voters, header_data=header_data)
             logger.info(f"Extracted {len(voters)} voter records")
     
     # Finalize

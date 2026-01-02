@@ -7,7 +7,7 @@ Represents the complete processed document with all associated data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from datetime import datetime
 import uuid
 
@@ -31,6 +31,11 @@ class PageData:
     # Source files
     image_path: str = ""
     
+    # Page header metadata (extracted from top section)
+    assembly_constituency_number_and_name: str = ""  # e.g., "116-SULUR"
+    section_number_and_name: str = ""  # e.g., "1-Karupparayan Kovil Street Ward No-9"
+    part_number: Optional[int] = None  # e.g., 244
+    
     # Voters on this page (in order)
     voters: List[Voter] = field(default_factory=list)
     
@@ -47,16 +52,20 @@ class PageData:
         return sum(1 for v in self.voters if v.epic_valid)
     
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "page_id": self.page_id,
             "page_number": self.page_number,
             "image_path": self.image_path,
+            "assembly_constituency_number_and_name": self.assembly_constituency_number_and_name,
+            "section_number_and_name": self.section_number_and_name,
+            "part_number": self.part_number,
             "crops_count": self.crops_count,
             "voters_count": self.voters_count,
             "valid_voters_count": self.valid_voters_count,
             "processing_time_sec": round(self.processing_time_sec, 4),
             "voters": [v.to_dict() for v in self.voters],
         }
+        return result
 
 
 @dataclass
@@ -124,12 +133,19 @@ class ProcessedDocument:
         
         self.pages.append(page_data)
     
-    def add_voters(self, voters: List[Voter]) -> None:
+    def add_voters(self, voters: List[Voter], header_data: Optional[Dict[str, Any]] = None) -> None:
         """
         Add voters from a flat list, grouping by image_file.
         
         This is a convenience method for adding voters when page data
         is not already structured.
+        
+        Args:
+            voters: List of Voter objects
+            header_data: Optional dict mapping page_id to header info with keys:
+                - assembly_constituency_number_and_name
+                - section_number_and_name
+                - part_number
         """
         from collections import defaultdict
         
@@ -157,11 +173,31 @@ class ProcessedDocument:
             except (IndexError, ValueError):
                 pass
             
+            # Get header info for this page if available
+            assembly_info = ""
+            section_info = ""
+            part_num = None
+            
+            if header_data and page_id in header_data:
+                page_header = header_data[page_id]
+                # Support both dict and dataclass-like objects
+                if hasattr(page_header, 'assembly_constituency_number_and_name'):
+                    assembly_info = page_header.assembly_constituency_number_and_name or ""
+                    section_info = page_header.section_number_and_name or ""
+                    part_num = page_header.part_number
+                elif isinstance(page_header, dict):
+                    assembly_info = page_header.get('assembly_constituency_number_and_name', "")
+                    section_info = page_header.get('section_number_and_name', "")
+                    part_num = page_header.get('part_number')
+            
             page = PageData(
                 page_id=page_id,
                 page_number=page_num,
                 voters=page_voters,
                 crops_count=len(page_voters),
+                assembly_constituency_number_and_name=assembly_info,
+                section_number_and_name=section_info,
+                part_number=part_num,
             )
             self.add_page(page)
     
@@ -250,6 +286,9 @@ class ProcessedDocument:
                     "images_processed": p.crops_count,
                     "voters_count": p.voters_count,
                     "processing_time_sec": round(p.processing_time_sec, 4),
+                    "assembly_constituency_number_and_name": p.assembly_constituency_number_and_name,
+                    "section_number_and_name": p.section_number_and_name,
+                    "part_number": p.part_number,
                 }
                 for p in self.pages
             ],

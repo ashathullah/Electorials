@@ -1,0 +1,46 @@
+﻿Testing header extraction on: engilsh_removed
+Images dir: extracted\engilsh_removed\images
+Crop-top dir: extracted\engilsh_removed\crop-top
+17:45:33 | DEBUG    | Log file: C:\Users\ashat\persnal\projects\congress\Electorials\logs\20260102_174533.log
+17:45:33 | DEBUG    | Tesseract version: 5.4.0.20240606
+Running header extraction...
+17:45:33 | INFO     | Starting HeaderExtractor
+17:45:33 | DEBUG    | Tesseract version: 5.4.0.20240606
+17:45:33 | INFO     | Extracting headers from 5 page(s)
+17:45:35 | INFO     | Header extraction complete pages=5 time=1.84s
+17:45:35 | INFO     | Completed HeaderExtractor duration=1.86s
+Extraction result: True
+Found 5 headers
+
+page-001:
+  Assembly: 
+  Section: 
+  Part: None
+  Raw text preview: None...
+
+page-002:
+  Assembly: 116-SULUR
+  Section: 
+  Part: 244
+  Raw text preview: Assembly Constituency No and Name : 116-SULUR Part No. : 244...
+
+page-003:
+  Assembly: 116-SULUR
+  Section: 1-Karupparayan Kovil Street Ward No-9
+  Part: 244
+  Raw text preview: Assembly Constituency No and Name : 116-SULUR Part No. : 244
+Section No and Name 1-Karupparayan Kovil Street Ward No-9...
+
+page-004:
+  Assembly: 116-SULUR
+  Section: 1-Karupparayan Kovil Street Ward No-9
+  Part: 244
+  Raw text preview: Assembly Constituency No and Name : 116-SULUR Part No. : 244
+Section No and Name 1-Karupparayan Kovil Street Ward No-9...
+
+page-005:
+  Assembly: 116-SULUR
+  Section: 
+  Part: 244
+  Raw text preview: Assembly Constituency No and Name : 116-SULUR Part No. : 244
+co α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«àα«╡α»ê α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à α«à...

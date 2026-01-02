@@ -36,6 +36,7 @@ class ProcessingContext:
     extracted_dir: Optional[Path] = None
     images_dir: Optional[Path] = None
     crops_dir: Optional[Path] = None
+    crop_top_dir: Optional[Path] = None  # Directory for header/top section crops
     output_dir: Optional[Path] = None
     
     # Processing statistics
@@ -64,12 +65,14 @@ class ProcessingContext:
         self.extracted_dir = self.config.extracted_dir / self.pdf_name
         self.images_dir = self.extracted_dir / "images"
         self.crops_dir = self.extracted_dir / "crops"
+        self.crop_top_dir = self.extracted_dir / "crop-top"  # Header crops
         self.output_dir = self.extracted_dir / "output"
         
         # Ensure directories exist
         self.extracted_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(exist_ok=True)
         self.crops_dir.mkdir(exist_ok=True)
+        self.crop_top_dir.mkdir(exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
     
     def setup_paths_from_extracted(self, extracted_dir: Path) -> None:
@@ -83,9 +86,11 @@ class ProcessingContext:
         self.pdf_name = extracted_dir.name
         self.images_dir = extracted_dir / "images"
         self.crops_dir = extracted_dir / "crops"
+        self.crop_top_dir = extracted_dir / "crop-top"  # Header crops
         self.output_dir = extracted_dir / "output"
         
         # Ensure directories exist
+        self.crop_top_dir.mkdir(exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
 
 

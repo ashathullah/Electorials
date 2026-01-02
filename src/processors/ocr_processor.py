@@ -2162,28 +2162,77 @@ class OCRProcessor(BaseProcessor):
         # Clean house value - preserve letters and numbers
         s = txt.upper()
         s = re.sub(r"[^A-Z0-9/\-\s]", " ", s)
-        s = s.replace("O", "0").replace("I", "1")
         
-        tokens = [t.strip("/-") for t in s.split() if t.strip("/-")]
+        # Clean the result using the smarter function
+        return self._clean_house_number(s)
+    
+    def _clean_house_number(self, raw_text: str) -> str:
+        """
+        Clean and correct OCR'd house number text.
+        
+        Handles common OCR errors:
+        - "6L283" -> "283" (noise prefix before digits)
+        - "0035-1" -> "D35-1" (leading 0 could be D, B, or other letter)
+        - "O" -> "0" in digit positions
+        - "I" -> "1" in digit positions
+        """
+        if not raw_text:
+            return ""
+        
+        tokens = [t.strip("/-") for t in raw_text.split() if t.strip("/-")]
         
         for t in tokens:
             if not re.search(r"\d", t):
                 continue
             
-            # Check for valid alphanumeric patterns first (e.g., D35-1, A1, 123A)
-            # Pattern: optional letter prefix + digits + optional suffix
-            alpha_match = re.match(r"^([A-Z]?\d+[A-Z]?[-/]?\d*)$", t)
+            # First, handle the noise prefix pattern like "6L283", "6GL324"
+            # These often have random digits/letters before the real number
+            # Pattern: Check if there's a number followed by 1-2 letters then more digits
+            noise_prefix_match = re.match(r"^(\d{1,2})([A-Z]{1,2})(\d+.*)$", t)
+            if noise_prefix_match:
+                # The real house number is likely the digits after the noise letters
+                real_part = noise_prefix_match.group(3)
+                # Clean O->0 and I->1 in the digit portions
+                real_part = self._fix_ocr_digits(real_part)
+                if len(real_part) <= 10:
+                    return real_part
+            
+            # Handle the leading-0-is-actually-a-letter pattern
+            # e.g., "0035-1" could be "D35-1", "B35-1", etc.
+            # Check if: leading 0, followed by 2+ more digits, then optional suffix
+            leading_zero_match = re.match(r"^(0{1,2})(\d{2,})([-/]\d+)?$", t)
+            if leading_zero_match:
+                leading_zeros = leading_zero_match.group(1)
+                remaining_digits = leading_zero_match.group(2)
+                suffix = leading_zero_match.group(3) or ""
+                
+                # If there's just one leading zero, it's likely a letter like D
+                # Common OCR confusions: D->0, B->8 or 0, O->0
+                if len(leading_zeros) == 1:
+                    # Return with D as the most common letter misread as 0
+                    return f"D{remaining_digits}{suffix}"
+                elif len(leading_zeros) == 2:
+                    # Two leading zeros? Might be "00" or "DO" or similar
+                    # Strip first zero, keep second as potential D
+                    return f"D{remaining_digits}{suffix}"
+            
+            # Check for valid alphanumeric patterns (e.g., D35-1, A1, 123A, 123-4)
+            # Apply O->0 and I->1 fixes for letter-in-digit-position issues
+            t_fixed = self._fix_ocr_digits(t)
+            
+            alpha_match = re.match(r"^([A-Z]?\d+[A-Z]?[-/]?\d*)$", t_fixed)
             if alpha_match:
                 cleaned = alpha_match.group(1)
                 # Reject PIN codes (6 digits starting with 6)
-                if len(cleaned) >= 6 and cleaned.isdigit() and cleaned.startswith("6"):
-                    continue
+                if len(cleaned) >= 6 and cleaned.replace("-", "").replace("/", "").isdigit():
+                    clean_digits = cleaned.replace("-", "").replace("/", "")
+                    if clean_digits.startswith("6"):
+                        continue
                 if len(cleaned) <= 10:
                     return cleaned
             
-            # Fallback: Extract longest digit sequence for pure noise patterns
-            # like "6L283", "6GL324"
-            digit_sequences = re.findall(r"\d+", t)
+            # Fallback: Extract longest digit sequence with OCR fixes
+            digit_sequences = re.findall(r"\d+", t_fixed)
             if digit_sequences:
                 cleaned = max(digit_sequences, key=len)
                 if len(cleaned) >= 6 and cleaned.startswith("6"):
@@ -2192,6 +2241,33 @@ class OCRProcessor(BaseProcessor):
                     return cleaned
         
         return ""
+    
+    def _fix_ocr_digits(self, text: str) -> str:
+        """
+        Fix common OCR letter/digit confusions in text.
+        
+        Only converts O->0 and I->1 when they appear in positions
+        that are likely meant to be digits (surrounded by digits).
+        """
+        if not text:
+            return text
+        
+        result = []
+        chars = list(text)
+        
+        for i, c in enumerate(chars):
+            prev_is_digit = (i > 0 and chars[i-1].isdigit())
+            next_is_digit = (i < len(chars) - 1 and chars[i+1].isdigit())
+            
+            # Only convert O->0 or I->1 if surrounded by or adjacent to digits
+            if c == 'O' and (prev_is_digit or next_is_digit):
+                result.append('0')
+            elif c == 'I' and (prev_is_digit or next_is_digit):
+                result.append('1')
+            else:
+                result.append(c)
+        
+        return "".join(result)
     
     def _extract_age(self, lines: List[str]) -> str:
         """Extract age from lines."""

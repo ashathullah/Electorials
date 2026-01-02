@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Union
 from datetime import datetime
 
 from ..models import ProcessedDocument, Voter, DocumentMetadata, ProcessingStats
@@ -285,3 +285,158 @@ class JSONStore:
             "timing": doc_data.get("timing", {}),
             "ai_usage": doc_data.get("ai_usage", {}),
         }
+
+    def save_to_csv(self, document: Union[ProcessedDocument, dict[str, Any]]) -> List[Path]:
+        """
+        Save document data to CSV files.
+        
+        Creates two files:
+        - <base_dir>/<pdf_name>/output/csv/<pdf_name>_voters.csv
+        - <base_dir>/<pdf_name>/output/csv/<pdf_name>_metadata.csv
+        
+        Args:
+            document: Processed document object or dict (already in combined format)
+            
+        Returns:
+            List of paths to saved files
+        """
+        import csv
+        
+        if isinstance(document, dict):
+            data = document
+            # Extract pdf_name from data or error?
+            # dictionary "folder" is usually pdf_name in to_combined_json
+            pdf_name = data.get("folder") or data.get("document", {}).get("pdf_name")
+            if not pdf_name:
+                 raise ValueError("Could not determine pdf_name from dictionary data")
+        else:
+            pdf_name = document.pdf_name
+            data = document.to_combined_json()
+        
+        output_dir = self._get_output_dir(pdf_name) / "csv"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        saved_paths = []
+        
+        # 1. Save Voters CSV
+        voters_path = output_dir / f"{pdf_name}_voters.csv"
+        saved_paths.append(voters_path)
+        records = data.get("records", [])
+        
+        if records:
+            # Collect all keys dynamically
+            keys = set()
+            for r in records:
+                keys.update(r.keys())
+            
+            # Exclude unwanted voter keys
+            voter_exclude = {
+                "processing_time_ms", "page_id", "sequence_in_page", 
+                "sequence_in_document", "image_file"
+            }
+            final_keys = {k for k in keys if k not in voter_exclude}
+            
+            # Prioritize standard keys order for better readability
+            ordered_keys = [
+                "serial_no", "epic_no", "name", "relation_type", "relation_name",
+                "age", "gender", "house_no", 
+                "assembly_constituency_number_and_name",
+                "section_number_and_name", "part_number"
+            ]
+            
+            # Add remaining keys sorted
+            remaining = sorted([k for k in final_keys if k not in ordered_keys])
+            fieldnames = [k for k in ordered_keys if k in final_keys] + remaining
+            
+            try:
+                with open(voters_path, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                    writer.writeheader()
+                    writer.writerows(records)
+            except PermissionError:
+                print(f"ERROR: Permission denied when writing to {voters_path}")
+                print("       Please close the file if it is open in another program (like Excel) and try again.")
+        else:
+            # Create empty CSV with headers if possible, or just empty file
+            try:
+                with open(voters_path, "w", newline="", encoding="utf-8-sig") as f:
+                    pass
+            except PermissionError:
+                print(f"ERROR: Permission denied when writing to {voters_path}")
+                print("       Please close the file if it is open in another program (like Excel) and try again.")
+
+        # 2. Save Metadata CSV
+        metadata_path = output_dir / f"{pdf_name}_metadata.csv"
+        saved_paths.append(metadata_path)
+        
+        # Flatten metadata helper
+        def flatten_dict(d: dict, parent_key: str = '', sep: str = '_') -> dict:
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                elif isinstance(v, list):
+                    # Convert list to string representation or join if simple
+                    # specific handling for sections list? 
+                    # For general case, keep lists as strings to avoid explosion
+                    # But user said "include json data can make them flat"
+                    # If it's a list of dicts, standard csv flatten is hard.
+                    # We will keep list as string for now unless specific structure is known.
+                    items.append((new_key, json.dumps(v, ensure_ascii=False)))
+                else:
+                    items.append((new_key, v))
+            return dict(items)
+
+        meta_row = {}
+        
+        # Top level fields (excluding complex structures)
+        exclude_fields = ["records", "pages", "metadata", "timing", "stats", "ai_usage"]
+        for k, v in data.items():
+            if k not in exclude_fields:
+                meta_row[k] = v
+        
+        # Flatten nested 'metadata' object recursively
+        # User requested removing 'metadata_' prefix, so we pass parent_key=''
+        # Fallback: Validation if metadata is missing in main dict, try to reload from sidecar
+        if not data.get("metadata"):
+            try:
+                sidecar = self.load_metadata(pdf_name)
+                if sidecar:
+                    data["metadata"] = sidecar
+            except Exception:
+                pass # Ignore if failed, just proceed
+
+        if data.get("metadata"):
+            flat_metadata = flatten_dict(data["metadata"], parent_key='')
+            meta_row.update(flat_metadata)
+
+        # Flatten 'timing'
+        if data.get("timing"):
+             flat_timing = flatten_dict(data["timing"], parent_key='timing')
+             meta_row.update(flat_timing)
+        
+        # Filter unwanted metadata keys
+        # Note: keys no longer have 'metadata_' prefix
+        metadata_exclude = {
+            "folder", "document_id", "status", "created_at", "processed_at",
+            "language_detected", "page_number_current",
+            "ai_metadata_provider", "ai_metadata_model",
+            "metadata_document_id", # old key
+            "document_id" # possible collision if inside metadata
+        }
+        
+        final_meta_row = {k: v for k, v in meta_row.items() if k not in metadata_exclude}
+                
+        # Write metadata CSV (single row)
+        if final_meta_row:
+            try:
+                with open(metadata_path, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=sorted(final_meta_row.keys()))
+                    writer.writeheader()
+                    writer.writerow(final_meta_row)
+            except PermissionError:
+                print(f"ERROR: Permission denied when writing to {metadata_path}")
+                print("       Please close the file if it is open in another program (like Excel) and try again.")
+        
+        return saved_paths

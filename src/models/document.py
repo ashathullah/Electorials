@@ -254,7 +254,11 @@ class ProcessedDocument:
         all_records = []
         for page in self.pages:
             for voter in page.voters:
-                all_records.append(voter.to_dict())
+                voter_dict = voter.to_dict()
+                voter_dict["assembly_constituency_number_and_name"] = page.assembly_constituency_number_and_name
+                voter_dict["section_number_and_name"] = page.section_number_and_name
+                voter_dict["part_number"] = page.part_number
+                all_records.append(voter_dict)
         
         return {
             "folder": self.pdf_name,

@@ -147,9 +147,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "header", "merge", "ocr", "all"],
+        choices=["extract", "metadata", "crop", "header", "merge", "ocr", "csv", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part).",
+        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'csv' exports processing results to CSV.",
     )
     
     parser.add_argument(
@@ -224,6 +224,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         dest="use_tamil_ocr",
         help="Use Tamil OCR (ocr_tamil) instead of Tesseract (requires GPU for best performance).",
+    )
+    
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="Export ID data to CSV after processing (default: /extracted/<name>/output/csv/). Implied if --step=csv.",
     )
     
     return parser.parse_args()
@@ -329,7 +335,7 @@ def process_pdf(
     
     # Step 3.5: Extract page header metadata
     header_data = {}
-    if args.step in ["header", "crop", "all"]:
+    if args.step in ["header", "crop", "ocr", "all"]:
         logger.info("Step 3.5: Extracting page header metadata...")
         
         header_extractor = HeaderExtractor(context, languages=args.languages)
@@ -388,6 +394,28 @@ def process_pdf(
     if args.step in ["ocr", "all"]:
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
+        
+    # Step 6: CSV Export
+    if args.csv or args.step == "csv":
+        if document.status == "completed" or args.step == "csv":
+            # If step is just CSV, we might need to load existing document if not in memory
+            # But process_pdf creates a new document. 
+            # If step=csv, we should check if we can load existing data
+            if args.step == "csv" and not document.pages:
+                existing_data = store.load_document(context.pdf_name)
+                if existing_data:
+                    logger.info("Loaded existing data for CSV export")
+                    store.save_to_csv(existing_data)
+                    logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+                    return document
+                else:
+                    logger.warning("No existing processed data found for CSV export")
+                    return document
+            
+            # If we just finished processing (document is populated)
+            logger.info("Step 6: Exporting to CSV...")
+            store.save_to_csv(document)
+            logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
     
     return document
 
@@ -462,7 +490,7 @@ def process_extracted_folder(
     
     # Step: Extract page header metadata
     header_data = {}
-    if args.step in ["header", "crop", "all"]:
+    if args.step in ["header", "crop", "ocr", "all"]:
         logger.info("Extracting page header metadata...")
         
         header_extractor = HeaderExtractor(context, languages=args.languages)
@@ -519,6 +547,23 @@ def process_extracted_folder(
     if args.step in ["ocr", "all"]:
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
+
+    # Step: CSV Export
+    if args.csv or args.step == "csv":
+        # If we just ran OCR, document is populated
+        if args.step in ["ocr", "all"] and document.status == "completed":
+            logger.info("Exporting to CSV...")
+            store.save_to_csv(document)
+            logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+        # If we are ONLY running CSV step on existing folder
+        elif args.step == "csv":
+            logger.info("Exporting existing data to CSV...")
+            existing_data = store.load_document(context.pdf_name)
+            if existing_data:
+                store.save_to_csv(existing_data)
+                logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+            else:
+                logger.warning(f"No processed output found for {context.pdf_name}, cannot export CSV")
     
     return document
 
@@ -600,7 +645,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "merge", "ocr", "metadata"] and not args.paths:
+    if args.step in ["crop", "merge", "ocr", "metadata", "csv"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

@@ -181,8 +181,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dpi",
         type=int,
-        default=200,
-        help="DPI for PDF rendering (default: 200)",
+        default=None,
+        help="DPI for PDF rendering (default: 200 or RENDER_DPI env var)",
     )
     
     parser.add_argument(
@@ -302,7 +302,10 @@ def process_pdf(
     if args.step in ["extract", "all"]:
         logger.info("Step 1: Extracting images from PDF...")
         
-        extractor = PDFExtractor(context, dpi=args.dpi)
+        # Determine DPI
+        dpi = args.dpi if args.dpi is not None else config.render_dpi
+        
+        extractor = PDFExtractor(context, dpi=dpi)
         if not extractor.run():
             document.status = "failed"
             document.error = "PDF extraction failed"

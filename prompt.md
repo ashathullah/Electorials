@@ -90,4 +90,14 @@ Rules for Extraction:
 - "voters": MUST be returned as an empty array [].
 - Set missing or illegible fields to null.
 
+the ward number should be a number
+
+(English)
+"ward_number": "WARD NO.10", (wrong) 
+"ward_number": "10", (correct)
+
+(Tamil)
+"ward_number": "வார்டு எண்.27", (wrong)
+"ward_number": "27", (correct)
+
 Output JSON ONLY — no explanation, no markdown.

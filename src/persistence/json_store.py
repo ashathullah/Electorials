@@ -318,54 +318,67 @@ class JSONStore:
         
         saved_paths = []
         
-        # 1. Save Voters CSV
+        # 1. Save Voters CSV (Custom Format)
         voters_path = output_dir / f"{pdf_name}_voters.csv"
         saved_paths.append(voters_path)
         records = data.get("records", [])
         
-        if records:
-            # Collect all keys dynamically
-            keys = set()
-            for r in records:
-                keys.update(r.keys())
+        # Define the exact columns requested
+        voter_headers = [
+            "serial_no",
+            "epic_id",
+            "name",
+            "father_name",
+            "mother_name",
+            "husband_name",
+            "other_name",
+            "age",
+            "gender",
+            "house_no",
+            "street",
+            "part_no",
+            "assembly"
+        ]
+        
+        formatted_records = []
+        for r in records:
+            relation_type = r.get("relation_type", "").lower()
+            relation_name = r.get("relation_name", "")
             
-            # Exclude unwanted voter keys
-            voter_exclude = {
-                "processing_time_ms", "page_id", "sequence_in_page", 
-                "sequence_in_document", "image_file"
+            # Map relation type to specific columns
+            father_name = relation_name if "father" in relation_type else ""
+            mother_name = relation_name if "mother" in relation_type else ""
+            husband_name = relation_name if "husband" in relation_type else ""
+            # Any other relation type goes to other_name
+            other_name = relation_name if relation_type not in ["father", "mother", "husband"] and relation_type else ""
+            
+            row = {
+                "serial_no": r.get("serial_no", ""),
+                "epic_id": r.get("epic_no", ""),
+                "name": r.get("name", ""),
+                "father_name": father_name,
+                "mother_name": mother_name,
+                "husband_name": husband_name,
+                "other_name": other_name,
+                "age": r.get("age", ""),
+                "gender": r.get("gender", ""),
+                "house_no": r.get("house_no", ""),
+                "street": r.get("street", ""),  # Placeholder if not available
+                "part_no": r.get("part_number", ""),
+                "assembly": r.get("assembly_constituency_number_and_name", "")
             }
-            final_keys = {k for k in keys if k not in voter_exclude}
+            formatted_records.append(row)
             
-            # Prioritize standard keys order for better readability
-            ordered_keys = [
-                "serial_no", "epic_no", "name", "relation_type", "relation_name",
-                "age", "gender", "house_no", 
-                "assembly_constituency_number_and_name",
-                "section_number_and_name", "part_number"
-            ]
-            
-            # Add remaining keys sorted
-            remaining = sorted([k for k in final_keys if k not in ordered_keys])
-            fieldnames = [k for k in ordered_keys if k in final_keys] + remaining
-            
-            try:
-                with open(voters_path, "w", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-                    writer.writeheader()
-                    writer.writerows(records)
-            except PermissionError:
-                print(f"ERROR: Permission denied when writing to {voters_path}")
-                print("       Please close the file if it is open in another program (like Excel) and try again.")
-        else:
-            # Create empty CSV with headers if possible, or just empty file
-            try:
-                with open(voters_path, "w", newline="", encoding="utf-8-sig") as f:
-                    pass
-            except PermissionError:
-                print(f"ERROR: Permission denied when writing to {voters_path}")
-                print("       Please close the file if it is open in another program (like Excel) and try again.")
-
-        # 2. Save Metadata CSV
+        try:
+            with open(voters_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=voter_headers)
+                writer.writeheader()
+                writer.writerows(formatted_records)
+        except PermissionError:
+            print(f"ERROR: Permission denied when writing to {voters_path}")
+            print("       Please close the file if it is open in another program (like Excel) and try again.")
+        
+        # 2. Save Metadata CSV (Reverted to flat format)
         metadata_path = output_dir / f"{pdf_name}_metadata.csv"
         saved_paths.append(metadata_path)
         
@@ -377,12 +390,7 @@ class JSONStore:
                 if isinstance(v, dict):
                     items.extend(flatten_dict(v, new_key, sep=sep).items())
                 elif isinstance(v, list):
-                    # Convert list to string representation or join if simple
-                    # specific handling for sections list? 
-                    # For general case, keep lists as strings to avoid explosion
-                    # But user said "include json data can make them flat"
-                    # If it's a list of dicts, standard csv flatten is hard.
-                    # We will keep list as string for now unless specific structure is known.
+                    # keeping lists as json strings
                     items.append((new_key, json.dumps(v, ensure_ascii=False)))
                 else:
                     items.append((new_key, v))
@@ -397,7 +405,6 @@ class JSONStore:
                 meta_row[k] = v
         
         # Flatten nested 'metadata' object recursively
-        # User requested removing 'metadata_' prefix, so we pass parent_key=''
         # Fallback: Validation if metadata is missing in main dict, try to reload from sidecar
         if not data.get("metadata"):
             try:
@@ -406,7 +413,7 @@ class JSONStore:
                     data["metadata"] = sidecar
             except Exception:
                 pass # Ignore if failed, just proceed
-
+        
         if data.get("metadata"):
             flat_metadata = flatten_dict(data["metadata"], parent_key='')
             meta_row.update(flat_metadata)
@@ -417,13 +424,12 @@ class JSONStore:
              meta_row.update(flat_timing)
         
         # Filter unwanted metadata keys
-        # Note: keys no longer have 'metadata_' prefix
         metadata_exclude = {
             "folder", "document_id", "status", "created_at", "processed_at",
             "language_detected", "page_number_current",
             "ai_metadata_provider", "ai_metadata_model",
-            "metadata_document_id", # old key
-            "document_id" # possible collision if inside metadata
+            "metadata_document_id", 
+            "document_id" 
         }
         
         final_meta_row = {k: v for k, v in meta_row.items() if k not in metadata_exclude}

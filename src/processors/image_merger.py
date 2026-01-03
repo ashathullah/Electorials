@@ -24,8 +24,7 @@ from .base import BaseProcessor, ProcessingContext
 from ..config import Config
 
 
-# Maximum number of voters per merged batch image
-MAX_VOTERS_PER_BATCH = 5
+
 
 
 @dataclass
@@ -52,7 +51,7 @@ class ImageMerger(BaseProcessor):
         self,
         context: ProcessingContext,
         voter_end_image: Optional[Path] = None,
-        max_voters_per_batch: int = MAX_VOTERS_PER_BATCH,
+        max_voters_per_batch: Optional[int] = None,
     ):
         """
         Initialize image merger.
@@ -70,7 +69,10 @@ class ImageMerger(BaseProcessor):
         else:
             self.voter_end_path = voter_end_image
         
-        self.max_voters_per_batch = max_voters_per_batch
+        if max_voters_per_batch is not None:
+            self.max_voters_per_batch = max_voters_per_batch
+        else:
+            self.max_voters_per_batch = self.config.merge.batch_size
         
         # Use standard crops and merged directories
         self.crops_dir = self.context.crops_dir

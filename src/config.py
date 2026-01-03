@@ -217,6 +217,12 @@ class OCRConfig:
 
 
 @dataclass
+class MergeConfig:
+    """Image merging configuration."""
+    batch_size: int = field(default_factory=lambda: _get_int_env("MERGE_BATCH_SIZE", 10))
+
+
+@dataclass
 class CropConfig:
     """Image cropping configuration."""
     # Canonical size for detection
@@ -270,6 +276,7 @@ class Config:
     s3: S3Config = field(default_factory=S3Config)
     ocr: OCRConfig = field(default_factory=OCRConfig)
     crop: CropConfig = field(default_factory=CropConfig)
+    merge: MergeConfig = field(default_factory=MergeConfig)
     
     # Processing limits
     default_limit: int = field(default_factory=lambda: _get_int_env("DEFAULT_LIMIT", 0))

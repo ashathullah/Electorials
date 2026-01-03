@@ -545,7 +545,7 @@ class OCRProcessor(BaseProcessor):
         # Extract batch number
         batch_name = batch_path.stem
         batch_num = batch_name.replace("batch-", "").replace("batch", "")
-        BATCH_SIZE = 5 
+        BATCH_SIZE = self.config.merge.batch_size 
         try:
             batch_offset = (int(batch_num) - 1) * BATCH_SIZE
         except ValueError:

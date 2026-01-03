@@ -108,6 +108,8 @@ class AIConfig:
     response_format: str = field(
         default_factory=lambda: os.getenv("AI_RESPONSE_FORMAT", "").strip().lower()
     )
+    batch_size: int = field(default_factory=lambda: _get_int_env("AI_OCR_BATCH_SIZE", 5))
+
     
     # Cost tracking
     input_cost_per_1m_usd: Optional[float] = field(
@@ -223,6 +225,12 @@ class MergeConfig:
 
 
 @dataclass
+class TopMergeConfig:
+    """Crop-top image merging configuration."""
+    batch_size: int = field(default_factory=lambda: _get_int_env("TOP_MERGE_BATCH_SIZE", 10))
+
+
+@dataclass
 class CropConfig:
     """Image cropping configuration."""
     # Canonical size for detection
@@ -277,6 +285,7 @@ class Config:
     ocr: OCRConfig = field(default_factory=OCRConfig)
     crop: CropConfig = field(default_factory=CropConfig)
     merge: MergeConfig = field(default_factory=MergeConfig)
+    top_merge: TopMergeConfig = field(default_factory=TopMergeConfig)
     
     # Processing limits
     default_limit: int = field(default_factory=lambda: _get_int_env("DEFAULT_LIMIT", 0))

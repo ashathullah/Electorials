@@ -423,6 +423,16 @@ class JSONStore:
              flat_timing = flatten_dict(data["timing"], parent_key='timing')
              meta_row.update(flat_timing)
         
+        # Check if we should include AI usage (Only if AI OCR was used)
+        # Check explicit processing method in records
+        include_ai_usage = any(r.get("processing_method") == "ai_groq" for r in data.get("records", []))
+        
+        if include_ai_usage and data.get("ai_usage"):
+             flat_ai = flatten_dict(data["ai_usage"], parent_key="ai_metadata_voter")
+             meta_row.update(flat_ai)
+
+
+        
         # Filter unwanted metadata keys
         metadata_exclude = {
             "folder", "document_id", "status", "created_at", "processed_at",

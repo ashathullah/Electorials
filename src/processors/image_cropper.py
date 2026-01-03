@@ -54,6 +54,8 @@ AUTO_SKIP_MAX_EDGE_FRAC = 0.015
 
 # Field cropping ROI definitions (x1, y1, x2, y2) as fractions
 # Applied after cropping each voter box to create compact images with only data fields
+# Serial No region: top-left area
+SERIAL_NO_ROI = (0.184327, 0.065617, 0.337748, 0.207349)
 # EPIC region: top-right area containing the EPIC number
 EPIC_ROI = (0.662, 0.064, 0.980, 0.194)
 # Other fields region: center-left area containing Name, Relation, House No, Age, Gender
@@ -164,8 +166,10 @@ class ImageCropper(BaseProcessor):
         """
         Apply ROI-based field extraction to create a compact image.
         
-        Extracts EPIC region and other fields region, then stitches them
-        together vertically (EPIC on top, fields below).
+        Extracts Serial No, EPIC region and other fields region, then stitches them
+        together:
+        Top Row: [Serial No] [Spacer] [EPIC]
+        Bottom Row: [Other Fields]
         
         Args:
             img: Input grayscale voter crop image
@@ -174,6 +178,13 @@ class ImageCropper(BaseProcessor):
             Compact stitched image with only data fields
         """
         H, W = img.shape[:2]
+
+        # Extract Serial No region
+        serial_x1 = int(W * SERIAL_NO_ROI[0])
+        serial_y1 = int(H * SERIAL_NO_ROI[1])
+        serial_x2 = int(W * SERIAL_NO_ROI[2])
+        serial_y2 = int(H * SERIAL_NO_ROI[3])
+        serial_region = img[serial_y1:serial_y2, serial_x1:serial_x2]
         
         # Extract EPIC region
         epic_x1 = int(W * EPIC_ROI[0])
@@ -190,34 +201,67 @@ class ImageCropper(BaseProcessor):
         fields_region = img[fields_y1:fields_y2, fields_x1:fields_x2]
         
         # Validate regions - fallback to original if extraction fails
-        if epic_region.size == 0 or fields_region.size == 0:
+        if epic_region.size == 0 or fields_region.size == 0 or serial_region.size == 0:
             return img
         
-        # Make widths consistent for stacking
-        epic_w = epic_region.shape[1]
-        fields_w = fields_region.shape[1]
-        max_width = max(epic_w, fields_w)
+        # --- Build Top Row (Serial + EPIC) ---
+        serial_h, serial_w = serial_region.shape[:2]
+        epic_h, epic_w = epic_region.shape[:2]
+        max_top_h = max(serial_h, epic_h)
         
-        # Pad EPIC region if needed (center it)
-        if epic_w < max_width:
-            left_pad = (max_width - epic_w) // 2
-            right_pad = max_width - epic_w - left_pad
-            epic_region = np.hstack([
-                np.full((epic_region.shape[0], left_pad), STITCH_BG_COLOR, dtype=np.uint8),
+        # Pad Serial vertically to match height
+        if serial_h < max_top_h:
+            top = (max_top_h - serial_h) // 2
+            bottom = max_top_h - serial_h - top
+            serial_region = np.vstack([
+                np.full((top, serial_w), STITCH_BG_COLOR, dtype=np.uint8),
+                serial_region,
+                np.full((bottom, serial_w), STITCH_BG_COLOR, dtype=np.uint8)
+            ])
+            
+        # Pad EPIC vertically to match height
+        if epic_h < max_top_h:
+            top = (max_top_h - epic_h) // 2
+            bottom = max_top_h - epic_h - top
+            epic_region = np.vstack([
+                np.full((top, epic_w), STITCH_BG_COLOR, dtype=np.uint8),
                 epic_region,
-                np.full((epic_region.shape[0], right_pad), STITCH_BG_COLOR, dtype=np.uint8)
+                np.full((bottom, epic_w), STITCH_BG_COLOR, dtype=np.uint8)
+            ])
+            
+        # Horizontal spacer between Serial and EPIC (15px)
+        h_spacer = np.full((max_top_h, 15), STITCH_BG_COLOR, dtype=np.uint8)
+        
+        top_row = np.hstack([serial_region, h_spacer, epic_region])
+        
+        # --- Stack Top Row with Fields (Vertical) ---
+        top_h, top_w = top_row.shape[:2]
+        fields_h, fields_w = fields_region.shape[:2]
+        max_total_w = max(top_w, fields_w)
+        
+        # Pad Top Row horizontally (Center it)
+        if top_w < max_total_w:
+            left = (max_total_w - top_w) // 2
+            right = max_total_w - top_w - left
+            top_row = np.hstack([
+                np.full((top_h, left), STITCH_BG_COLOR, dtype=np.uint8),
+                top_row,
+                np.full((top_h, right), STITCH_BG_COLOR, dtype=np.uint8)
+            ])
+            
+        # Pad Fields horizontally (Center or Left - let's do Left + Fill to match width)
+        if fields_w < max_total_w:
+            right = max_total_w - fields_w
+            fields_region = np.hstack([
+                fields_region,
+                np.full((fields_h, right), STITCH_BG_COLOR, dtype=np.uint8)
             ])
         
-        # Pad fields region if needed (left-align)
-        if fields_w < max_width:
-            padding = np.full((fields_region.shape[0], max_width - fields_w), STITCH_BG_COLOR, dtype=np.uint8)
-            fields_region = np.hstack([fields_region, padding])
+        # Vertical spacer between Top Row and Fields
+        v_spacer = np.full((STITCH_SPACING, max_total_w), STITCH_BG_COLOR, dtype=np.uint8)
         
-        # Create spacing row
-        spacing = np.full((STITCH_SPACING, max_width), STITCH_BG_COLOR, dtype=np.uint8)
-        
-        # Stack vertically: EPIC -> spacing -> other fields
-        return np.vstack([epic_region, spacing, fields_region])
+        # Final Stack
+        return np.vstack([top_row, v_spacer, fields_region])
     
     def process(self) -> bool:
         """

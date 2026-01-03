@@ -71,6 +71,7 @@ from src.processors import (
     ImageMerger,
     OCRProcessor,
     HeaderExtractor,
+    CropTopMerger,
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
 from src.utils.timing import Timer
@@ -147,9 +148,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "field-crop", "header", "merge", "ocr", "csv", "all"],
+        choices=["extract", "metadata", "crop", "field-crop", "header", "merge", "top-merge", "ocr", "csv", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'field-crop' extracts data fields and stitches into compact images. 'csv' exports processing results to CSV.",
+        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'field-crop' extracts data fields and stitches into compact images. 'top-merge' merges crop-top images with filename labels. 'csv' exports processing results to CSV.",
     )
     
     parser.add_argument(
@@ -225,6 +226,13 @@ def parse_args() -> argparse.Namespace:
         dest="use_tamil_ocr",
         help="Use Tamil OCR (ocr_tamil) instead of Tesseract (requires GPU for best performance).",
     )
+    
+    parser.add_argument(
+        "--use-ai-ocr",
+        action="store_true",
+        help="Use AI (Groq) Vision for OCR extraction instead of local OCR.",
+    )
+
     
     parser.add_argument(
         "--csv",
@@ -348,6 +356,17 @@ def process_pdf(
         else:
             logger.warning("Header extraction failed or no headers found")
     
+    # Step 3.6: Merge crop-top images with filename labels
+    if args.step in ["top-merge", "all"]:
+        logger.info("Step 3.6: Merging crop-top images...")
+        
+        top_merger = CropTopMerger(context)
+        if top_merger.run() and top_merger.summary:
+            logger.info(
+                f"Merged {top_merger.summary.total_images} crop-top images into "
+                f"{top_merger.summary.total_batch_files} batches"
+            )
+    
     # Step 4: Merge cropped images
     if args.step in ["merge", "all"]:
         logger.info("Step 4: Merging cropped images...")
@@ -373,17 +392,27 @@ def process_pdf(
             )
             logger.info(f"Saved page {page_id}: {len(page_voters)} voters in {page_time:.2f}s")
         
-        ocr_processor = OCRProcessor(
-            context,
-            languages=args.languages,
-            dump_raw_ocr=args.dump_raw_ocr,
-            use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
-            use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
-            on_page_complete=save_page_callback,
-        )
+        if args.use_ai_ocr:
+            from src.processors import AIOCRProcessor
+            logger.info("Using AI (Groq) for OCR extraction")
+            processor = AIOCRProcessor(
+                context,
+                on_page_complete=save_page_callback,
+            )
+        else:
+            processor = OCRProcessor(
+                context,
+                languages=args.languages,
+                dump_raw_ocr=args.dump_raw_ocr,
+                use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
+                use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
+                on_page_complete=save_page_callback,
+            )
+
         
-        if ocr_processor.run():
-            voters = ocr_processor.get_all_voters()
+        if processor.run():
+            voters = processor.get_all_voters()
+
             document.add_voters(voters, header_data=header_data)
             logger.info(f"Extracted {len(voters)} voter records")
         else:
@@ -503,6 +532,17 @@ def process_extracted_folder(
         else:
             logger.warning("Header extraction failed or no headers found")
     
+    # Step: Merge crop-top images with filename labels
+    if args.step in ["top-merge", "all"]:
+        logger.info("Merging crop-top images...")
+        
+        top_merger = CropTopMerger(context)
+        if top_merger.run() and top_merger.summary:
+            logger.info(
+                f"Merged {top_merger.summary.total_images} crop-top images into "
+                f"{top_merger.summary.total_batch_files} batches"
+            )
+    
     # Step: Merge cropped images
     if args.step in ["merge", "all"]:
         logger.info("Merging cropped images...")
@@ -528,17 +568,27 @@ def process_extracted_folder(
             )
             logger.info(f"Saved page {page_id}: {len(page_voters)} voters in {page_time:.2f}s")
         
-        ocr_processor = OCRProcessor(
-            context,
-            languages=args.languages,
-            dump_raw_ocr=args.dump_raw_ocr,
-            use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
-            use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
-            on_page_complete=save_page_callback,
-        )
+        if args.use_ai_ocr:
+            from src.processors import AIOCRProcessor
+            logger.info("Using AI (Groq) for OCR extraction")
+            processor = AIOCRProcessor(
+                context,
+                on_page_complete=save_page_callback,
+            )
+        else:
+            processor = OCRProcessor(
+                context,
+                languages=args.languages,
+                dump_raw_ocr=args.dump_raw_ocr,
+                use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
+                use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
+                on_page_complete=save_page_callback,
+            )
+
         
-        if ocr_processor.run():
-            voters = ocr_processor.get_all_voters()
+        if processor.run():
+            voters = processor.get_all_voters()
+
             document.add_voters(voters, header_data=header_data)
             logger.info(f"Extracted {len(voters)} voter records")
     
@@ -648,7 +698,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "field-crop", "merge", "ocr", "metadata", "csv"] and not args.paths:
+    if args.step in ["crop", "field-crop", "merge", "top-merge", "ocr", "metadata", "csv"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

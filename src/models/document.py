@@ -152,8 +152,11 @@ class ProcessedDocument:
         # Group voters by page (derived from image_file)
         by_page = defaultdict(list)
         for voter in voters:
+            # Prioritize explicit page_id
+            if voter.page_id:
+                page_id = voter.page_id
             # Extract page_id from image_file (e.g., "page-004-001.png" -> "page-004")
-            if voter.image_file:
+            elif voter.image_file:
                 parts = voter.image_file.split("-")
                 if len(parts) >= 2:
                     page_id = f"{parts[0]}-{parts[1]}"
@@ -162,6 +165,7 @@ class ProcessedDocument:
             else:
                 page_id = "unknown"
             by_page[page_id].append(voter)
+
         
         # Sort and add each page
         for page_id in sorted(by_page.keys()):
@@ -190,6 +194,11 @@ class ProcessedDocument:
                     section_info = page_header.get('section_number_and_name', "")
                     part_num = page_header.get('part_number')
             
+            # Get timing from stats
+            proc_time = 0.0
+            if self.stats and self.stats.page_timings:
+                proc_time = sum(pt.total_time_sec for pt in self.stats.page_timings if pt.page_id == page_id)
+
             page = PageData(
                 page_id=page_id,
                 page_number=page_num,
@@ -198,8 +207,10 @@ class ProcessedDocument:
                 assembly_constituency_number_and_name=assembly_info,
                 section_number_and_name=section_info,
                 part_number=part_num,
+                processing_time_sec=proc_time,
             )
             self.add_page(page)
+
     
     def complete(self) -> None:
         """Mark document as completed."""
@@ -281,6 +292,17 @@ class ProcessedDocument:
                 "total_time_sec": round(self.stats.total_time_sec, 4),
                 "avg_time_per_voter_ms": round(self.stats.avg_time_per_voter_ms, 2),
             },
+            
+            # AI Metadata (if applicable)
+            "ai_metadata_voter": {
+                "provider": self.stats.ai_usage.provider or "Groq", 
+                "model": self.stats.ai_usage.model,
+                "input_tokens": self.stats.ai_usage.total_input_tokens,
+                "output_tokens": self.stats.ai_usage.total_output_tokens,
+                "cost_usd": self.stats.ai_usage.total_cost_usd, 
+            } if self.stats.ai_usage.calls_count > 0 else None,
+
+
             
             # Page summaries
             "pages": [

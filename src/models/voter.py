@@ -42,8 +42,10 @@ class Voter:
     # Processing metrics
     processing_time_ms: float = 0.0
     extraction_confidence: float = 0.0
+    processing_method: str = ""
     
     def __post_init__(self):
+
         """Validate and clean data after initialization."""
         # Clean whitespace
         self.serial_no = self.serial_no.strip()

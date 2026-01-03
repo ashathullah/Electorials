@@ -6,6 +6,7 @@ Tracks performance metrics for processing operations.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Any
 from datetime import datetime
@@ -13,13 +14,14 @@ from datetime import datetime
 
 @dataclass
 class AIUsage:
-    """AI API usage tracking."""
+    """AI API usage tracking (thread-safe)."""
     provider: str = ""
     model: str = ""
     calls_count: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_cost_usd: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     
     def add_call(
         self,
@@ -27,15 +29,23 @@ class AIUsage:
         output_tokens: int,
         cost_usd: Optional[float] = None
     ) -> None:
-        """Add a single API call to the usage stats."""
-        self.calls_count += 1
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
-        if cost_usd is not None:
-            self.total_cost_usd += cost_usd
+        """Add a single API call to the usage stats (thread-safe)."""
+        with self._lock:
+            self.calls_count += 1
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            if cost_usd is not None:
+                self.total_cost_usd += cost_usd
     
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "calls_count": self.calls_count,
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_cost_usd": self.total_cost_usd,
+        }
 
 
 @dataclass

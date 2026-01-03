@@ -147,9 +147,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "header", "merge", "ocr", "csv", "all"],
+        choices=["extract", "metadata", "crop", "field-crop", "header", "merge", "ocr", "csv", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'csv' exports processing results to CSV.",
+        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'field-crop' extracts data fields and stitches into compact images. 'csv' exports processing results to CSV.",
     )
     
     parser.add_argument(
@@ -648,7 +648,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "merge", "ocr", "metadata", "csv"] and not args.paths:
+    if args.step in ["crop", "field-crop", "merge", "ocr", "metadata", "csv"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

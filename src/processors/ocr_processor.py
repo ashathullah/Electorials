@@ -75,7 +75,14 @@ HOUSE_PATTERNS = [
     r"வீட்டு\s*எண்",
     r"வீட்டுஎண்",
     r"ட்டு\s*எண்",
+    r"வீட்டு\s*எண்",
+    r"வீட்டுஎண்",
+    r"ட்டு\s*எண்",
+    r"வீட்டு",
+    r"எண்",
     r"house\s*(?:no|number)?",
+    r"Doorno",
+    r"Door\s*no",
 ]
 
 AGE_PATTERNS = [r"வயது", r"age"]
@@ -538,7 +545,7 @@ class OCRProcessor(BaseProcessor):
         # Extract batch number
         batch_name = batch_path.stem
         batch_num = batch_name.replace("batch-", "").replace("batch", "")
-        BATCH_SIZE = 5 
+        BATCH_SIZE = self.config.merge.batch_size 
         try:
             batch_offset = (int(batch_num) - 1) * BATCH_SIZE
         except ValueError:
@@ -998,7 +1005,7 @@ class OCRProcessor(BaseProcessor):
                 re.IGNORECASE | re.UNICODE
             )
             if match:
-                return match.group(1).strip()
+                return self._clean_house_number(match.group(1).strip())
         return ""
     
     def _get_merged_images(self) -> List[Path]:
@@ -2032,7 +2039,7 @@ class OCRProcessor(BaseProcessor):
                 if house:
                     # Convert Tamil digits and clean
                     house = convert_tamil_digits(house)
-                    return house
+                    return self._clean_house_number(house)
         
         combined_pattern = r"(?:" + "|".join(HOUSE_PATTERNS) + r")"
         
@@ -2054,8 +2061,9 @@ class OCRProcessor(BaseProcessor):
                     # Clean up any trailing noise
                     house_val = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", house_val, flags=re.IGNORECASE)
                     house_val = convert_tamil_digits(house_val.strip())
-                    if house_val and len(house_val) <= 15:
-                        return house_val
+                    cleaned = self._clean_house_number(house_val)
+                    if cleaned and len(cleaned) <= 20:
+                        return cleaned
                 
                 # Fallback to _extract_value_after_colon
                 value = self._extract_value_after_colon(line, combined_pattern)
@@ -2068,7 +2076,8 @@ class OCRProcessor(BaseProcessor):
                     return house_match.group(1)
                 
                 cleaned = re.sub(r"[^\dA-Za-z/\-]", "", value)
-                if cleaned and len(cleaned) <= 15:
+                cleaned = self._clean_house_number(cleaned)
+                if cleaned and len(cleaned) <= 20:
                     return cleaned
         
         # Fallback to ROI extraction
@@ -2096,29 +2105,48 @@ class OCRProcessor(BaseProcessor):
                 if num_match:
                     house_val = num_match.group(1)
                     # Validate - house numbers are typically short
-                    if len(house_val) <= 10:
+                    if len(house_val) <= 20:
                         return house_val
                 
-                # Try to extract from next word
-                if i + 1 < len(words):
-                    next_word = words[i + 1].strip()
-                    # Check if next word starts with a digit
-                    if next_word and len(next_word) > 0 and next_word[0].isdigit():
-                        num_match = re.match(r"(\d+[A-Za-z/\-]*)", next_word)
-                        if num_match:
-                            house_val = num_match.group(1)
-                            if len(house_val) <= 10:
-                                return house_val
+                # Try to extract from next few words (sometimes OCR splits the number)
+                # Look ahead up to 3 words
+                extracted_parts = []
+                for k in range(1, 4):
+                    if i + k < len(words):
+                        next_word = words[i + k].strip()
+                        # Stop if it hits another field marker
+                        if any(marker in next_word for marker in ["எண்", "வயது", "பாலினம்", "Photo", "Age", "Gender", "Name"]):
+                            break
+                        
+                        # Apply basic cleaning
+                        clean_next = next_word.strip(".,:;-")
+                        if not clean_next: 
+                             continue
+                             
+                        # Check if it looks like part of a house number (digits/letters)
+                        if re.match(r"^[A-Z0-9/\-]+$", clean_next, re.IGNORECASE):
+                             extracted_parts.append(clean_next)
+                        else:
+                             break
+                    else:
+                        break
+                
+                if extracted_parts:
+                    # Combine parts found
+                    full_val = "".join(extracted_parts) if len(extracted_parts) == 1 else "-".join(extracted_parts)
+                    # Use stricter check on the combined string
+                    if len(full_val) < 20:
+                         return full_val
         
         # Also look for standalone number pattern after வீட்டுஎண் combined
         for i, word in enumerate(words):
             word_clean = word.strip()
-            if "வீட்டுஎண்" in word_clean or "வீட்டு" in word_clean:
+            if "வீட்டுஎண்" in word_clean or "வீட்டு" in word_clean or "house" in word_clean.lower():
                 # Check if house number is embedded like வீட்டுஎயின் or similar with number
-                num_match = re.search(r"[வீட்டு|எண்]+[ஃ;:,&]?\s*(\d+[A-Za-z/\-]*)", word_clean)
+                num_match = re.search(r"[:\-–—\s]+([A-Za-z0-9/\-]+)", word_clean)
                 if num_match:
                     house_val = num_match.group(1)
-                    if len(house_val) <= 10:
+                    if len(house_val) <= 20:
                         return house_val
         
         return ""
@@ -2170,77 +2198,50 @@ class OCRProcessor(BaseProcessor):
         """
         Clean and correct OCR'd house number text.
         
-        Handles common OCR errors:
-        - "6L283" -> "283" (noise prefix before digits)
-        - "0035-1" -> "D35-1" (leading 0 could be D, B, or other letter)
-        - "O" -> "0" in digit positions
-        - "I" -> "1" in digit positions
+        Optimized for 'process as is':
+        - Minimal aggressive regex replacement
+        - Fixes obvious OCR digit errors (O->0, I->1) if seemingly numeric
+        - Preserves alphanumeric patterns "11-A", "D35-1"
         """
         if not raw_text:
             return ""
         
-        tokens = [t.strip("/-") for t in raw_text.split() if t.strip("/-")]
+        # Basic cleanup of noise chars that are definitely not part of house no
+        text = raw_text.strip(" .,:;()[]{}'\"")
         
-        for t in tokens:
-            if not re.search(r"\d", t):
-                continue
-            
-            # First, handle the noise prefix pattern like "6L283", "6GL324"
-            # These often have random digits/letters before the real number
-            # Pattern: Check if there's a number followed by 1-2 letters then more digits
-            noise_prefix_match = re.match(r"^(\d{1,2})([A-Z]{1,2})(\d+.*)$", t)
-            if noise_prefix_match:
-                # The real house number is likely the digits after the noise letters
-                real_part = noise_prefix_match.group(3)
-                # Clean O->0 and I->1 in the digit portions
-                real_part = self._fix_ocr_digits(real_part)
-                if len(real_part) <= 10:
-                    return real_part
-            
-            # Handle the leading-0-is-actually-a-letter pattern
-            # e.g., "0035-1" could be "D35-1", "B35-1", etc.
-            # Check if: leading 0, followed by 2+ more digits, then optional suffix
-            leading_zero_match = re.match(r"^(0{1,2})(\d{2,})([-/]\d+)?$", t)
-            if leading_zero_match:
-                leading_zeros = leading_zero_match.group(1)
-                remaining_digits = leading_zero_match.group(2)
-                suffix = leading_zero_match.group(3) or ""
-                
-                # If there's just one leading zero, it's likely a letter like D
-                # Common OCR confusions: D->0, B->8 or 0, O->0
-                if len(leading_zeros) == 1:
-                    # Return with D as the most common letter misread as 0
-                    return f"D{remaining_digits}{suffix}"
-                elif len(leading_zeros) == 2:
-                    # Two leading zeros? Might be "00" or "DO" or similar
-                    # Strip first zero, keep second as potential D
-                    return f"D{remaining_digits}{suffix}"
-            
-            # Check for valid alphanumeric patterns (e.g., D35-1, A1, 123A, 123-4)
-            # Apply O->0 and I->1 fixes for letter-in-digit-position issues
-            t_fixed = self._fix_ocr_digits(t)
-            
-            alpha_match = re.match(r"^([A-Z]?\d+[A-Z]?[-/]?\d*)$", t_fixed)
-            if alpha_match:
-                cleaned = alpha_match.group(1)
-                # Reject PIN codes (6 digits starting with 6)
-                if len(cleaned) >= 6 and cleaned.replace("-", "").replace("/", "").isdigit():
-                    clean_digits = cleaned.replace("-", "").replace("/", "")
-                    if clean_digits.startswith("6"):
-                        continue
-                if len(cleaned) <= 10:
-                    return cleaned
-            
-            # Fallback: Extract longest digit sequence with OCR fixes
-            digit_sequences = re.findall(r"\d+", t_fixed)
-            if digit_sequences:
-                cleaned = max(digit_sequences, key=len)
-                if len(cleaned) >= 6 and cleaned.startswith("6"):
-                    continue  # Skip PIN codes
-                if len(cleaned) <= 4:
-                    return cleaned
+        # Split by likely separators to handle "House No: 123" if extracted loosely
+        # We assume the extraction logic passed us the value part, but just in case
+        tokens = text.split()
         
-        return ""
+        # Use the last token if multiple are present, or try to find the best candidate
+        # But 'process as is' suggests we should try to keep what we found.
+        # Let's clean the longest token that looks alphanumeric.
+        
+        best_token = text # Default to full text if splitting is ambiguous
+        
+        if len(tokens) > 1:
+            # Pick the token with digits
+            for t in tokens:
+                if any(c.isdigit() for c in t):
+                     best_token = t
+                     break
+        
+        # Apply digit fixes (O->0, I->1)
+        fixed_token = self._fix_ocr_digits(best_token)
+        
+        # Remove common prefix noise that OCR adds (like single letters before digits)
+        # e.g. "L123" -> "123", but "D123" should stay "D123"
+        # This is tricky. User wants "process as is".
+        
+        # Check if it matches a broad house number pattern
+        # Allowed: Uppercase Letters, Digits, /, -
+        if re.match(r"^[A-Z0-9/\-]+$", fixed_token):
+             return fixed_token
+        
+        # If not, try to strip non-allowed chars
+        cleaned = re.sub(r"[^A-Z0-9/\-]", "", fixed_token)
+        
+        return cleaned
     
     def _fix_ocr_digits(self, text: str) -> str:
         """

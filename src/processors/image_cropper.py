@@ -52,6 +52,16 @@ AUTO_SKIP_MIN_LINE_RATIO = 0.70
 AUTO_SKIP_MIN_LARGEST_CC_RATIO = 0.35
 AUTO_SKIP_MAX_EDGE_FRAC = 0.015
 
+# Field cropping ROI definitions (x1, y1, x2, y2) as fractions
+# Applied after cropping each voter box to create compact images with only data fields
+# EPIC region: top-right area containing the EPIC number
+EPIC_ROI = (0.662, 0.064, 0.980, 0.194)
+# Other fields region: center-left area containing Name, Relation, House No, Age, Gender
+OTHER_FIELDS_ROI = (0.028, 0.225, 0.735, 0.909)
+# Spacing between stitched regions
+STITCH_SPACING = 2
+STITCH_BG_COLOR = 255  # White background
+
 
 @dataclass
 class CropMetrics:
@@ -149,6 +159,65 @@ class ImageCropper(BaseProcessor):
             return False
         
         return True
+    
+    def _extract_fields(self, img: np.ndarray) -> np.ndarray:
+        """
+        Apply ROI-based field extraction to create a compact image.
+        
+        Extracts EPIC region and other fields region, then stitches them
+        together vertically (EPIC on top, fields below).
+        
+        Args:
+            img: Input grayscale voter crop image
+            
+        Returns:
+            Compact stitched image with only data fields
+        """
+        H, W = img.shape[:2]
+        
+        # Extract EPIC region
+        epic_x1 = int(W * EPIC_ROI[0])
+        epic_y1 = int(H * EPIC_ROI[1])
+        epic_x2 = int(W * EPIC_ROI[2])
+        epic_y2 = int(H * EPIC_ROI[3])
+        epic_region = img[epic_y1:epic_y2, epic_x1:epic_x2]
+        
+        # Extract other fields region
+        fields_x1 = int(W * OTHER_FIELDS_ROI[0])
+        fields_y1 = int(H * OTHER_FIELDS_ROI[1])
+        fields_x2 = int(W * OTHER_FIELDS_ROI[2])
+        fields_y2 = int(H * OTHER_FIELDS_ROI[3])
+        fields_region = img[fields_y1:fields_y2, fields_x1:fields_x2]
+        
+        # Validate regions - fallback to original if extraction fails
+        if epic_region.size == 0 or fields_region.size == 0:
+            return img
+        
+        # Make widths consistent for stacking
+        epic_w = epic_region.shape[1]
+        fields_w = fields_region.shape[1]
+        max_width = max(epic_w, fields_w)
+        
+        # Pad EPIC region if needed (center it)
+        if epic_w < max_width:
+            left_pad = (max_width - epic_w) // 2
+            right_pad = max_width - epic_w - left_pad
+            epic_region = np.hstack([
+                np.full((epic_region.shape[0], left_pad), STITCH_BG_COLOR, dtype=np.uint8),
+                epic_region,
+                np.full((epic_region.shape[0], right_pad), STITCH_BG_COLOR, dtype=np.uint8)
+            ])
+        
+        # Pad fields region if needed (left-align)
+        if fields_w < max_width:
+            padding = np.full((fields_region.shape[0], max_width - fields_w), STITCH_BG_COLOR, dtype=np.uint8)
+            fields_region = np.hstack([fields_region, padding])
+        
+        # Create spacing row
+        spacing = np.full((STITCH_SPACING, max_width), STITCH_BG_COLOR, dtype=np.uint8)
+        
+        # Stack vertically: EPIC -> spacing -> other fields
+        return np.vstack([epic_region, spacing, fields_region])
     
     def process(self) -> bool:
         """
@@ -344,15 +413,18 @@ class ImageCropper(BaseProcessor):
                     skipped_post_ocr += 1
                     continue
             
+            # Apply field extraction to create compact image
+            compact_img = self._extract_fields(ocr_img)
+            
             # Create directory on first save
             if not crops_dir.exists():
                 crops_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save crop
+            # Save compact crop
             crop_name = f"{page_id}-{box.box_index:03d}.png"
             out_path = crops_dir / crop_name
             
-            cv2.imwrite(str(out_path), ocr_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            cv2.imwrite(str(out_path), compact_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
             
             box.output_path = out_path
             saved_crops.append(box)

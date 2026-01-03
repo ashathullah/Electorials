@@ -72,8 +72,10 @@ class ImageMerger(BaseProcessor):
         
         self.max_voters_per_batch = max_voters_per_batch
         
-        # Output directory - inside extracted folder
+        # Use standard crops and merged directories
+        self.crops_dir = self.context.crops_dir
         self.merged_dir = self.context.extracted_dir / "merged" if self.context.extracted_dir else None
+        
         self.summary: Optional[MergeSummary] = None
         
         # Cache voter_end image
@@ -85,12 +87,12 @@ class ImageMerger(BaseProcessor):
             self.log_error("Merged directory not set (extracted_dir not set)")
             return False
         
-        if not self.context.crops_dir:
+        if not self.crops_dir:
             self.log_error("Crops directory not set")
             return False
         
-        if not self.context.crops_dir.exists():
-            self.log_error(f"Crops directory not found: {self.context.crops_dir}")
+        if not self.crops_dir.exists():
+            self.log_error(f"Crops directory not found: {self.crops_dir}")
             return False
         
         if not self.voter_end_path.exists():
@@ -120,11 +122,10 @@ class ImageMerger(BaseProcessor):
         """
         start_time = time.perf_counter()
         
-        crops_dir = self.context.crops_dir
-        page_dirs = self._get_page_dirs(crops_dir)
+        page_dirs = self._get_page_dirs(self.crops_dir)
         
         if not page_dirs:
-            self.log_warning(f"No page directories found in {crops_dir}")
+            self.log_warning(f"No page directories found in {self.crops_dir}")
             return False
         
         self.log_info(f"Found {len(page_dirs)} page(s) with crops")

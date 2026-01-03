@@ -4,3 +4,5 @@ __pycache__/
 extracted/
 logs/
 cropped/
+pdfs/
+pdf_all/

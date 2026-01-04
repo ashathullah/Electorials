@@ -90,6 +90,18 @@ Rules for Extraction:
 - "voters": MUST be returned as an empty array [].
 - Set missing or illegible fields to null.
 
+STRUCTURE HINTS (Critical):
+1. Top Header: Look for "Assembly Constituency No. and Name" (e.g., "114-Tirupparankundram"). The number (114) is the 'assembly_constituency_number' and the name is 'assembly_constituency_name'.
+2. Part Number: distinct from the sequence number. Look for "Part No." or "No. & Name of Sections" followed by the part number (e.g., "Part No. 1").
+3. Summary Table (Back Page): A grid with rows for "Men", "Women", "Third Gender", "Total". Columns often include "Mother Roll", "Supplement 1", "Supplement 2" (or "Additions"/"Deletions").
+
+TIPS FOR TAMIL DOCUMENTS:
+- "Assembly Constituency" often appears as "சட்டமன்றத் தொகுதி".
+- "Parliamentary Constituency" often appears as "நாடாளுமன்றத் தொகுதி".
+- "Part Number" appears as "பாகம் எண்".
+- "Section" appears as "பிரிவு".
+- "Year" appears as "ஆண்டு" or "வருடம்".
+
 the ward number should be a number
 
 (English)

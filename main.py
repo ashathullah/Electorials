@@ -388,7 +388,7 @@ def process_pdf(
     if args.step in ["metadata", "all"] and not args.skip_metadata:
         logger.info("Step 2: Extracting metadata using AI...")
         
-        metadata_extractor = MetadataExtractor(context, force=True)
+        metadata_extractor = MetadataExtractor(context, force=True, output_identifier=args.output_identifier)
         if metadata_extractor.run() and metadata_extractor.result:
             document.metadata = metadata_extractor.result
             # Transfer AI usage from context to document stats
@@ -732,7 +732,7 @@ def process_metadata_only(
     # Extract metadata using AI
     logger.info("Step 2: Extracting metadata using AI...")
     
-    metadata_extractor = MetadataExtractor(context, force=True)
+    metadata_extractor = MetadataExtractor(context, force=True, output_identifier=args.output_identifier)
     if metadata_extractor.run() and metadata_extractor.result:
         document.metadata = metadata_extractor.result
         # Transfer AI usage from context to document stats

@@ -41,6 +41,8 @@ class ImageScore:
     table_line_ratio: float
 
 
+    
+
 class MetadataExtractor(BaseProcessor):
     """
     Extract metadata from Electoral Roll PDFs using AI.
@@ -56,6 +58,7 @@ class MetadataExtractor(BaseProcessor):
         context: ProcessingContext,
         prompt_path: Optional[Path] = None,
         force: bool = False,
+        output_identifier: Optional[str] = None,
     ):
         """
         Initialize extractor.
@@ -64,10 +67,12 @@ class MetadataExtractor(BaseProcessor):
             context: Processing context
             prompt_path: Path to prompt file (default: prompt.md in project root)
             force: Overwrite existing metadata
+            output_identifier: Optional identifier to include in metadata
         """
         super().__init__(context)
         self.prompt_path = prompt_path or self.config.base_dir / "prompt.md"
         self.force = force
+        self.output_identifier = output_identifier
         self.result: Optional[DocumentMetadata] = None
     
     def validate(self) -> bool:
@@ -129,6 +134,7 @@ class MetadataExtractor(BaseProcessor):
         
         content = None
         ai_meta = None
+        parsed_result = None
         
         for attempt in range(max_retries + 1):
             try:
@@ -137,7 +143,37 @@ class MetadataExtractor(BaseProcessor):
                     front_image=front_page,
                     back_image=back_page,
                 )
-                break
+                
+                # Parse to validate
+                try:
+                    current_parsed = self._extract_json(content)
+                    
+                    # Check completeness
+                    if self._is_complete(current_parsed):
+                        parsed_result = current_parsed
+                        break
+                    
+                    # If not complete, treat as failure unless it's the last attempt
+                    if attempt < max_retries:
+                        self.log_warning(f"Metadata incomplete (attempt {attempt + 1}), retrying...")
+                        # Save result anyway in case next attempts fail worse or crash
+                        parsed_result = current_parsed
+                        
+                        wait = retry_delay * (2 ** attempt)
+                        time.sleep(wait)
+                        continue
+                    else:
+                        parsed_result = current_parsed
+                        
+                except Exception as parse_e:
+                    # If parsing fails, that's an error
+                    if attempt < max_retries:
+                        self.log_warning(f"Failed to parse AI response (attempt {attempt + 1}), retrying...", error=parse_e)
+                        wait = retry_delay * (2 ** attempt)
+                        time.sleep(wait)
+                        continue
+                    raise parse_e
+
             except Exception as e:
                 is_last = attempt == max_retries
                 if is_last:
@@ -153,20 +189,20 @@ class MetadataExtractor(BaseProcessor):
                 time.sleep(wait)
         
         extraction_time_sec = time.time() - start_time
-        ai_meta["extraction_time_sec"] = round(extraction_time_sec, 2)
+        if ai_meta:
+            ai_meta["extraction_time_sec"] = round(extraction_time_sec, 2)
         
-        # Parse response
-        try:
-            parsed = self._extract_json(content)
-        except Exception as e:
-            self.log_error("Failed to parse AI response", error=e)
-            self._save_error(str(e), front_page, back_page, content)
-            return False
+        parsed = parsed_result
+
         
         # IMPORTANT: Always overwrite ai_metadata field from AI response
         # The AI might return an ai_metadata field in its JSON, but we need our tracked data
         if isinstance(parsed, dict):
             parsed["ai_metadata"] = self._flatten_ai_metadata(ai_meta)
+            
+            # Add output identifier if present
+            if self.output_identifier:
+                parsed["output_identifier"] = self.output_identifier
         
         # Update context AI usage
         if ai_meta.get("usage"):
@@ -272,6 +308,30 @@ class MetadataExtractor(BaseProcessor):
         
         # If scoring fails entirely, use second-to-last
         return images[-2]
+
+    def _is_complete(self, data: dict) -> bool:
+        """Check if critical metadata fields are present."""
+        if not data:
+            return False
+            
+        constituency = data.get("constituency_details", {})
+        if not constituency:
+            return False
+            
+        # Critical fields that should not be empty
+        # Note: We check for truthiness, so None or "" will trigger retry
+        critical_fields = [
+            constituency.get("assembly_constituency_name"),
+            constituency.get("assembly_constituency_number"),
+            constituency.get("part_number")
+        ]
+        
+        for field in critical_fields:
+            if not field and field != 0: # 0 is a valid number, but usually these are strings or >0 ints
+                return False
+                
+        return True
+
     
     def _score_back_page(self, image_path: Path) -> ImageScore:
         """
@@ -580,6 +640,7 @@ def extract_metadata(
     extracted_dir: Path,
     prompt_path: Optional[Path] = None,
     force: bool = False,
+    output_identifier: Optional[str] = None,
 ) -> Optional[DocumentMetadata]:
     """
     Convenience function to extract metadata from an extracted folder.
@@ -598,7 +659,7 @@ def extract_metadata(
     context = ProcessingContext(config=config)
     context.setup_paths_from_extracted(extracted_dir)
     
-    extractor = MetadataExtractor(context, prompt_path=prompt_path, force=force)
+    extractor = MetadataExtractor(context, prompt_path=prompt_path, force=force, output_identifier=output_identifier)
     
     if not extractor.run():
         return None

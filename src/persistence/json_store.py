@@ -448,6 +448,11 @@ class JSONStore:
         }
         
         final_meta_row = {k: v for k, v in meta_row.items() if k not in metadata_exclude}
+        
+        # Ensure output_identifier is included if provided
+        if output_identifier and "output_identifier" not in final_meta_row:
+            final_meta_row["output_identifier"] = output_identifier
+
                 
         # Write metadata CSV (single row)
         if final_meta_row:

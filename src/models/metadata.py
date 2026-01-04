@@ -136,6 +136,7 @@ class DocumentMetadata:
     roll_identification: str = ""
     total_pages: Optional[int] = None
     page_number_current: Optional[int] = None
+    output_identifier: Optional[str] = None
     
     # Nested structures
     constituency_details: ConstituencyDetails = field(default_factory=ConstituencyDetails)
@@ -169,6 +170,7 @@ class DocumentMetadata:
             "roll_identification": self.roll_identification,
             "total_pages": self.total_pages,
             "page_number_current": self.page_number_current,
+            "output_identifier": self.output_identifier,
             "constituency_details": self.constituency_details.to_dict(),
             "administrative_address": self.administrative_address.to_dict(),
             "polling_details": self.polling_details.to_dict(),
@@ -221,6 +223,7 @@ class DocumentMetadata:
         metadata.roll_identification = doc_meta.get("roll_identification", "")
         metadata.total_pages = doc_meta.get("total_pages")
         metadata.page_number_current = doc_meta.get("page_number_current")
+        metadata.output_identifier = response_data.get("output_identifier")
         
         # Constituency details
         const_data = response_data.get("constituency_details", {})

@@ -16,7 +16,7 @@ Pillow>=10.2.0            # Image loading
 # =========================
 # OCR - Tamil OCR (Primary)
 # =========================
-ocr-tamil>=0.4.0          # Tamil OCR with CRAFT text detection
+# ocr-tamil>=0.4.0          # Tamil OCR with CRAFT text detection
                           # https://github.com/gnana70/tamil_ocr
                           # Supports Tamil + English
                           # Faster and more accurate for Tamil text than Tesseract
@@ -63,7 +63,7 @@ boto3>=1.34.0             # AWS SDK for Python (S3 operations)
 # =========================
 # Utilities
 # =========================
-python-dotenv>=1.0.0      # Environment variable loading
+
 
 # =========================
 # Development (Optional)

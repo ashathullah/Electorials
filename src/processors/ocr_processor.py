@@ -94,7 +94,7 @@ GENDER_MAP = {
     "திருநங்கை": "Other", "other": "Other", "o": "Other",
 }
 
-PHOTO_MARKERS = ["photo", "phot", "available", "புகைப்பட", "படம்"]
+
 
 # Voter separator markers (from voter_end.jpg)
 VOTER_END_MARKERS = ["voter_end", "voter-end", "voterend", "VOTER_END", "VOTER-END", "VOTEREND"]
@@ -1442,7 +1442,7 @@ class OCRProcessor(BaseProcessor):
                                     r"எண்",          # Number
                                     r"வயது",        # Age
                                     r"பாலினம்",      # Gender
-                                    r"Photo",       # Photo marker
+
                                 ]
                                 
                                 # Split by field markers while keeping the markers
@@ -1589,7 +1589,7 @@ class OCRProcessor(BaseProcessor):
         if match:
             value = match.group(1).strip()
             value = re.sub(r"\s*[\-–—]\s*$", "", value)
-            value = re.sub(r"\s*(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+
             return value.strip()
         
         return ""
@@ -1628,7 +1628,7 @@ class OCRProcessor(BaseProcessor):
                     if value:
                         # Clean up any additional noise
                         value = re.sub(r"^[:\-–—\s]+", "", value)
-                        value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+
                         # Remove house number or other fields that might have leaked in
                         value = re.sub(r"\s*-\s*வீட்டு.*$", "", value)  # Remove - வீட்டு... (house no pattern)
                         value = re.sub(r"\s*எண்.*$", "", value)
@@ -1654,7 +1654,7 @@ class OCRProcessor(BaseProcessor):
         
         # Markers that indicate we've passed to relation section
         relation_markers = ["father", "mother", "husband", "தந்தை", "தாய்", "கணவர்"]
-        skip_markers = ["வீட்டு", "house", "photo", "age", "gender", "எண்", "வயது", "பாலினம்"]
+        skip_markers = ["வீட்டு", "house", "age", "gender", "எண்", "வயது", "பாலினம்"]
         
         for i, word in enumerate(words):
             word_clean = word.strip()
@@ -1780,7 +1780,7 @@ class OCRProcessor(BaseProcessor):
                         value = re.sub(r"^[:\-–—\s]+", "", value)
                         
                         # Remove trailing content that's not part of the name
-                        value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*$", "", value, flags=re.IGNORECASE)
+
                         value = re.sub(r"\s*எண்.*$", "", value)
                         value = re.sub(r"\s*வீட்டு.*$", "", value)
                         value = re.sub(r"\s*வயது.*$", "", value)
@@ -1832,7 +1832,7 @@ class OCRProcessor(BaseProcessor):
         
         # Skip markers for both Tamil and English
         skip_markers_tamil = ["வீட்டு", "எண்", "வயது", "பாலினம்"]
-        skip_markers_english = ["photo", "house", "age", "gender", "address", "no", "number"]
+        skip_markers_english = ["house", "age", "gender", "address", "no", "number"]
         skip_markers = skip_markers_tamil + skip_markers_english
         
         # Label words that should NOT be extracted as names (e.g., "பெயர்" = "name")
@@ -2059,7 +2059,7 @@ class OCRProcessor(BaseProcessor):
                 if direct_match:
                     house_val = direct_match.group(1).strip()
                     # Clean up any trailing noise
-                    house_val = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", house_val, flags=re.IGNORECASE)
+
                     house_val = convert_tamil_digits(house_val.strip())
                     cleaned = self._clean_house_number(house_val)
                     if cleaned and len(cleaned) <= 20:
@@ -2067,7 +2067,7 @@ class OCRProcessor(BaseProcessor):
                 
                 # Fallback to _extract_value_after_colon
                 value = self._extract_value_after_colon(line, combined_pattern)
-                value = re.sub(r"(Photo|photo|is|available|புகைப்பட|படம்).*", "", value, flags=re.IGNORECASE)
+
                 value = re.sub(r"\s+", "", value)
                 value = convert_tamil_digits(value)
                 

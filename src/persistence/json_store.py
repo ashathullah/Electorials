@@ -349,8 +349,6 @@ class JSONStore:
             father_name = relation_name if "father" in relation_type else ""
             mother_name = relation_name if "mother" in relation_type else ""
             husband_name = relation_name if "husband" in relation_type else ""
-            # Any other relation type goes to other_name
-            other_name = relation_name if relation_type not in ["father", "mother", "husband"] and relation_type else ""
             
             row = {
                 "serial_no": r.get("serial_no", ""),
@@ -359,7 +357,7 @@ class JSONStore:
                 "father_name": father_name,
                 "mother_name": mother_name,
                 "husband_name": husband_name,
-                "other_name": other_name,
+                "other_name": "",
                 "age": r.get("age", ""),
                 "gender": r.get("gender", ""),
                 "house_no": r.get("house_no", ""),

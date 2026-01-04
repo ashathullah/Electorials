@@ -20,7 +20,7 @@ from .metadata_extractor import MetadataExtractor
 from .image_cropper import ImageCropper
 from .image_merger import ImageMerger
 from .ocr_processor import OCRProcessor
-from .ai_ocr_processor import AIOCRProcessor
+from .ai_ocr_processor import AIOCRProcessor, FailedImage
 from .header_extractor import HeaderExtractor
 from .field_cropper import FieldCropper
 from .crop_top_merger import CropTopMerger
@@ -34,6 +34,7 @@ __all__ = [
     "ImageMerger",
     "OCRProcessor",
     "AIOCRProcessor",
+    "FailedImage",
     "HeaderExtractor",
     "FieldCropper",
     "CropTopMerger",

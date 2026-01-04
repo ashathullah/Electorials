@@ -100,10 +100,13 @@ class AIOCRProcessor(BaseProcessor):
             self.log_warning(f"No page directories found in {self.merged_dir}")
             return False
             
-        all_tasks: List[Tuple[Path, str]] = [] # List of (image_path, page_id)
+        # Structure to track task details: (image_path, page_id, image_index)
+        all_tasks = [] 
         
-        for page_dir in page_dirs:
+        for i, page_dir in enumerate(page_dirs):
             page_id = page_dir.name
+            self.page_start_times[page_id] = time.perf_counter()
+            
             images = sorted([
                 p for p in page_dir.iterdir() 
                 if p.is_file() and p.suffix.lower() in ('.png', '.jpg', '.jpeg')
@@ -111,96 +114,90 @@ class AIOCRProcessor(BaseProcessor):
             
             self.page_image_counts[page_id] = len(images)
             
-            for img in images:
-                all_tasks.append((img, page_id))
-
+            for img_idx, img in enumerate(images):
+                all_tasks.append((img, page_id, img_idx))
                 
         total_images = len(all_tasks)
         self.log_info(f"Collected {total_images} images from {len(page_dirs)} pages.")
         self.log_info(f"Processing with {self.ai_batch_size} concurrent requests (Model: {self.model})")
         
-        # 2. Process in concurrent windows
-        # We process windows of ai_batch_size concurrent requests.
-        concurrency = self.ai_batch_size
+        # Temporary storage for results before finalization: page_id -> {img_idx -> voters}
+        page_results = defaultdict(dict)
         
-        self.log_debug(f"Using concurrency level: {concurrency}")
-
+        # Track which pages are ready to be finalized
+        # We can only finalize page N if page N is done AND page N-1 is already finalized.
+        next_page_idx_to_finalize = 0
+        
         overall_start = time.perf_counter()
-
-        for i in range(0, total_images, concurrency):
-            window = all_tasks[i : i + concurrency]
-            window_idx = (i // concurrency) + 1
-            total_windows = (total_images + concurrency - 1) // concurrency
+        
+        # Use a single executor for all tasks to avoid "convoy effect"
+        # This ensures that as soon as one request finishes, another takes its place, 
+        # maintaining full utilization of the concurrency limit.
+        with ThreadPoolExecutor(max_workers=self.ai_batch_size) as executor:
+            future_to_info = {}
             
-            self.log_debug(f"Processing Window {window_idx}/{total_windows} ({len(window)} concurrent requests)")
+            # Submit all tasks
+            for img, page_id, img_idx in all_tasks:
+                future = executor.submit(self._process_single_image, img)
+                future_to_info[future] = (page_id, img_idx, img)
             
-            try:
-                self._process_concurrent_window(window, i)
-            except Exception as e:
-                self.log_error(f"Window {window_idx} failed: {e}")
-                # Mark these images as processed (failed) so pages can still finalize
-                for _, page_id in window:
-                    self.page_images_processed[page_id] += 1
-                    self._check_and_finalize_page(page_id)
-
+            # Process as they complete
+            for future in as_completed(future_to_info):
+                page_id, img_idx, img_path = future_to_info[future]
+                
+                try:
+                    voters = future.result()
+                    page_results[page_id][img_idx] = voters
+                except Exception as e:
+                    self.log_error(f"Failed to process {img_path.name}: {e}")
+                    page_results[page_id][img_idx] = [] # Empty list on failure
+                
+                # Increment processed count
+                self.page_images_processed[page_id] += 1
+                
+                # Check for finalization (Sequential Logic)
+                # We loop to check if the *next expected page* is ready.
+                while next_page_idx_to_finalize < len(page_dirs):
+                    target_page_dir = page_dirs[next_page_idx_to_finalize]
+                    target_page_id = target_page_dir.name
+                    
+                    processed_count = self.page_images_processed[target_page_id]
+                    total_count = self.page_image_counts[target_page_id]
+                    
+                    if processed_count >= total_count:
+                        # Page is fully done. Finalize it.
+                        self._finalize_page_results(target_page_id, page_results[target_page_id])
+                        next_page_idx_to_finalize += 1
+                    else:
+                        # Next expected page is not ready yet. 
+                        # Even if subsequent pages are ready, we wait to maintain global order.
+                        break
+                        
         overall_elapsed = time.perf_counter() - overall_start
         self.log_info(f"AI OCR Completed. Processed {total_images} images in {overall_elapsed:.2f}s "
                       f"(Avg: {overall_elapsed/total_images:.2f}s/image)")
         return True
 
-
-    def _process_concurrent_window(self, window: List[Tuple[Path, str]], base_index: int):
+    def _finalize_page_results(self, page_id: str, results_dict: Dict[int, List[Dict[str, Any]]]):
         """
-        Process a window of images concurrently and map results back to pages.
-        
-        Args:
-            window: List of (image_path, page_id) tuples to process
-            base_index: The starting index in the global task list (for ordering)
+        Reassemble voters for a page in correct order and finalize.
         """
-        # Start timing for any new pages encountered in this window
-        for _, page_id in window:
-            if page_id not in self.page_start_times:
-                self.page_start_times[page_id] = time.perf_counter()
-
-        # Submit concurrent requests
-        # Each task carries: (index_in_window, image_path, page_id)
-        results_map: Dict[int, List[Dict[str, Any]]] = {}
+        # Reconstruct list sorted by image index
+        sorted_indices = sorted(results_dict.keys())
+        all_page_voters = []
         
-        with ThreadPoolExecutor(max_workers=len(window)) as executor:
-            # Submit all requests
-            future_to_idx = {}
-            for idx, (img_path, page_id) in enumerate(window):
-                future = executor.submit(self._process_single_image, img_path)
-                future_to_idx[future] = idx
-            
-            # Collect results as they complete
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    voters_data = future.result()
-                    results_map[idx] = voters_data
-                except Exception as e:
-                    img_path, page_id = window[idx]
-                    self.log_error(f"Failed to process {img_path.name}: {e}")
-                    results_map[idx] = []  # Empty result for failed image
-        
-        # Process results IN ORDER to maintain page sequencing
-        for idx in range(len(window)):
-            img_path, page_id = window[idx]
-            voters_data = results_map.get(idx, [])
-            
-            # Convert to Voter objects
-            new_voters = []
-            for v_data in voters_data:
+        for idx in sorted_indices:
+            raw_voters = results_dict.get(idx, [])
+            # Convert
+            for v_data in raw_voters:
                 voter = self._create_voter_from_dict(v_data, page_id)
-                new_voters.append(voter)
-            
-            # Store voters for this page
-            self.page_voters[page_id].extend(new_voters)
-            self.page_images_processed[page_id] += 1
-            
-            # Check if page is complete
-            self._check_and_finalize_page(page_id)
+                all_page_voters.append(voter)
+                
+        # Populate self.page_voters so _check_and_finalize_page uses the correct list
+        self.page_voters[page_id] = all_page_voters
+        
+        # Perform finalization (logging, stats, callbacks)
+        self._check_and_finalize_page(page_id)
     
     def _process_single_image(self, img_path: Path) -> List[Dict[str, Any]]:
         """

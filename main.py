@@ -58,6 +58,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Optional, Union
+import shutil
 
 from src.config import Config, get_config
 from src.logger import get_logger, setup_logger
@@ -75,7 +76,7 @@ from src.processors import (
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
 from src.utils.timing import Timer
-from src.utils.s3_utils import is_s3_url, download_from_s3
+from src.utils.s3_utils import is_s3_url, download_from_s3, upload_to_s3
 
 
 logger = get_logger("main")
@@ -235,10 +236,31 @@ def parse_args() -> argparse.Namespace:
 
     
     parser.add_argument(
-        "--csv",
-        action="store_true",
-        help="Export ID data to CSV after processing (default: /extracted/<name>/output/csv/). Implied if --step=csv.",
+        "--no-csv",
+        action="store_false",
+        dest="csv",
+        help="Disable ID data export to CSV after processing (default: csv export is enabled).",
     )
+    
+    parser.add_argument(
+        "--s3-input",
+        nargs="*",
+        help="List of S3 PDF URLs to process. Files will be downloaded first.",
+    )
+    
+    parser.add_argument(
+        "--s3-output",
+        type=str,
+        help="S3 directory URL to upload generated CSV files to.",
+    )
+    
+    parser.add_argument(
+        "--output-identifier",
+        type=str,
+        help="Identifier for the output directory structure and CSV field.",
+    )
+
+    parser.set_defaults(csv=True)
     
     return parser.parse_args()
 
@@ -270,6 +292,46 @@ def list_extracted_folders(config: Config) -> None:
         status = ", ".join(status_parts) if status_parts else "extracted only"
         
         logger.info(f"  {name}: {images_count} pages, {crops_count} crops [{status}]")
+
+
+def export_to_destination(csv_paths: List[Path], destination: str, config: Config) -> None:
+    """
+    Export CSV files to a secondary destination (S3 or local directory).
+    
+    Args:
+        csv_paths: List of CSV file paths
+        destination: Target destination (S3 URL or local path)
+        config: Application configuration
+    """
+    if not csv_paths or not destination:
+        return
+
+    # Check if S3
+    if is_s3_url(destination):
+        logger.info(f"Uploading CSVs to S3: {destination}")
+        for csv_path in csv_paths:
+            # Construct S3 URL
+            folder_url = destination.rstrip("/")
+            s3_url = f"{folder_url}/{csv_path.name}"
+            
+            try:
+                upload_to_s3(csv_path, s3_url, config.s3)
+                logger.info(f"Uploaded {csv_path.name} to {s3_url}")
+            except Exception as e:
+                logger.error(f"Failed to upload {csv_path.name} to S3: {e}")
+    else:
+        # Local directory
+        dest_dir = Path(destination)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Copying CSVs to local directory: {dest_dir}")
+            
+            for csv_path in csv_paths:
+                dest_file = dest_dir / csv_path.name
+                shutil.copy2(csv_path, dest_file)
+                logger.info(f"Copied {csv_path.name} to {dest_file}")
+        except Exception as e:
+            logger.error(f"Failed to copy to local directory {dest_dir}: {e}")
 
 
 def process_pdf(
@@ -326,7 +388,7 @@ def process_pdf(
     if args.step in ["metadata", "all"] and not args.skip_metadata:
         logger.info("Step 2: Extracting metadata using AI...")
         
-        metadata_extractor = MetadataExtractor(context, force=args.force)
+        metadata_extractor = MetadataExtractor(context, force=True)
         if metadata_extractor.run() and metadata_extractor.result:
             document.metadata = metadata_extractor.result
             # Transfer AI usage from context to document stats
@@ -446,8 +508,12 @@ def process_pdf(
             
             # If we just finished processing (document is populated)
             logger.info("Step 6: Exporting to CSV...")
-            store.save_to_csv(document)
+            csv_paths = store.save_to_csv(document, output_identifier=args.output_identifier)
             logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+            
+            # S3 Upload / Local Export
+            if args.s3_output and csv_paths:
+                export_to_destination(csv_paths, args.s3_output, config)
     
     return document
 
@@ -606,15 +672,24 @@ def process_extracted_folder(
         # If we just ran OCR, document is populated
         if args.step in ["ocr", "all"] and document.status == "completed":
             logger.info("Exporting to CSV...")
-            store.save_to_csv(document)
+            csv_paths = store.save_to_csv(document, output_identifier=args.output_identifier)
             logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+            
+            # S3 Upload / Local Export
+            if args.s3_output and csv_paths:
+                 export_to_destination(csv_paths, args.s3_output, config)
+
         # If we are ONLY running CSV step on existing folder
         elif args.step == "csv":
             logger.info("Exporting existing data to CSV...")
             existing_data = store.load_document(context.pdf_name)
             if existing_data:
-                store.save_to_csv(existing_data)
+                csv_paths = store.save_to_csv(existing_data, output_identifier=args.output_identifier)
                 logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
+                
+                # S3 Upload / Local Export
+                if args.s3_output and csv_paths:
+                    export_to_destination(csv_paths, args.s3_output, config)
             else:
                 logger.warning(f"No processed output found for {context.pdf_name}, cannot export CSV")
     
@@ -657,7 +732,7 @@ def process_metadata_only(
     # Extract metadata using AI
     logger.info("Step 2: Extracting metadata using AI...")
     
-    metadata_extractor = MetadataExtractor(context, force=args.force)
+    metadata_extractor = MetadataExtractor(context, force=True)
     if metadata_extractor.run() and metadata_extractor.result:
         document.metadata = metadata_extractor.result
         # Transfer AI usage from context to document stats
@@ -724,9 +799,33 @@ def main() -> int:
                 results.append(doc)
     
     else:
+        # Override extracted_dir if output_identifier is provided BEFORE any processing
+        if args.output_identifier:
+            # Structure: <output_identifier>/extracted/
+            new_extracted_dir = config.base_dir / args.output_identifier / "extracted"
+            logger.info(f"Using output identifier directory: {new_extracted_dir}")
+            config.extracted_dir = new_extracted_dir
+            config.extracted_dir.mkdir(parents=True, exist_ok=True)
+            
         # Process PDFs (local or S3)
         pdfs: List[Path] = []
         
+        # 1. Handle explicit --s3-input
+        if args.s3_input:
+            logger.info("Processing S3 input files...")
+            for s3_url in args.s3_input:
+                try:
+                    # Download to default S3 download dir or temp
+                    dl_path = download_from_s3(s3_url, config.s3)
+                    if dl_path and dl_path.exists():
+                        pdfs.append(dl_path)
+                        logger.info(f"Added S3 file: {dl_path.name}")
+                    else:
+                        logger.error(f"Failed to download or locate S3 file: {s3_url}")
+                except Exception as e:
+                    logger.error(f"Error processing S3 input {s3_url}: {e}")
+
+        # 2. Handle positional args (paths)
         if args.paths:
             # Resolve each path (handles S3 URLs and local paths)
             for path_str in args.paths:
@@ -735,8 +834,10 @@ def main() -> int:
                     pdfs.append(resolved)
                 else:
                     logger.warning(f"Skipping invalid path: {path_str}")
-        else:
-            # Default: process all PDFs in pdfs directory
+        
+        # If no paths specified anywhere, default to pdfs dir
+        if not pdfs and not args.s3_input and not args.paths:
+             # Default: process all PDFs in pdfs directory
             pdfs = list(iter_pdfs(config.pdfs_dir))
         
         if args.limit > 0:

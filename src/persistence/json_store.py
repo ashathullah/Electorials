@@ -286,7 +286,7 @@ class JSONStore:
             "ai_usage": doc_data.get("ai_usage", {}),
         }
 
-    def save_to_csv(self, document: Union[ProcessedDocument, dict[str, Any]]) -> List[Path]:
+    def save_to_csv(self, document: Union[ProcessedDocument, dict[str, Any]], output_identifier: Optional[str] = None) -> List[Path]:
         """
         Save document data to CSV files.
         
@@ -340,6 +340,9 @@ class JSONStore:
             "assembly"
         ]
         
+        if output_identifier:
+            voter_headers.append("output_identifier")
+        
         formatted_records = []
         for r in records:
             relation_type = r.get("relation_type", "").lower()
@@ -361,10 +364,14 @@ class JSONStore:
                 "age": r.get("age", ""),
                 "gender": r.get("gender", ""),
                 "house_no": r.get("house_no", ""),
-                "street": r.get("street", ""),  # Placeholder if not available
+                "street": r.get("street") or r.get("section_number_and_name", ""),
                 "part_no": r.get("part_number", ""),
                 "assembly": r.get("assembly_constituency_number_and_name", "")
             }
+            
+            if output_identifier:
+                row["output_identifier"] = output_identifier
+                
             formatted_records.append(row)
             
         try:

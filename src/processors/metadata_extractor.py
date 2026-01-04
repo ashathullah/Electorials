@@ -122,20 +122,38 @@ class MetadataExtractor(BaseProcessor):
         # Load prompt
         prompt_text = self.prompt_path.read_text(encoding="utf-8")
         
-        # Call AI with timing
+        # Call AI with timing and retry
         start_time = time.time()
-        try:
-            content, ai_meta = self._call_ai(
-                prompt_text=prompt_text,
-                front_image=front_page,
-                back_image=back_page,
-            )
-            extraction_time_sec = time.time() - start_time
-            ai_meta["extraction_time_sec"] = round(extraction_time_sec, 2)
-        except Exception as e:
-            self.log_error("AI call failed", error=e)
-            self._save_error(str(e), front_page, back_page, None)
-            return False
+        max_retries = self.config.ai.max_retries
+        retry_delay = self.config.ai.retry_delay_sec
+        
+        content = None
+        ai_meta = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                content, ai_meta = self._call_ai(
+                    prompt_text=prompt_text,
+                    front_image=front_page,
+                    back_image=back_page,
+                )
+                break
+            except Exception as e:
+                is_last = attempt == max_retries
+                if is_last:
+                    self.log_error(f"AI call failed after {max_retries + 1} attempts", error=e)
+                    self._save_error(str(e), front_page, back_page, None)
+                    return False
+                
+                wait = retry_delay * (2 ** attempt)
+                self.log_warning(
+                    f"AI call failed (attempt {attempt + 1}/{max_retries + 1}), retrying in {wait:.1f}s...",
+                    error=e
+                )
+                time.sleep(wait)
+        
+        extraction_time_sec = time.time() - start_time
+        ai_meta["extraction_time_sec"] = round(extraction_time_sec, 2)
         
         # Parse response
         try:

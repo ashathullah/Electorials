@@ -7,6 +7,7 @@ using grid-line detection and morphological operations.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -51,6 +52,12 @@ AUTO_SKIP_MAX_SMALL_COMPONENTS = 14
 AUTO_SKIP_MIN_LINE_RATIO = 0.70
 AUTO_SKIP_MIN_LARGEST_CC_RATIO = 0.35
 AUTO_SKIP_MAX_EDGE_FRAC = 0.015
+
+# Language-based page skipping
+# Non-voter pages (cover, instructions, etc.) at the beginning of documents
+TAMIL_SKIP_PAGES = 3   # Tamil documents: skip first 3 pages
+ENGLISH_SKIP_PAGES = 2  # English documents: skip first 2 pages
+DEFAULT_SKIP_PAGES = 2  # Fallback if language unknown
 
 # Field cropping ROI definitions (x1, y1, x2, y2) as fractions
 # Applied after cropping each voter box to create compact images with only data fields
@@ -149,6 +156,55 @@ class ImageCropper(BaseProcessor):
         self.diagram_filter = diagram_filter
         self.page_results: List[PageCropResult] = []
         self.summary: Optional[CropSummary] = None
+        self.skip_pages = self._get_skip_pages_count()
+    
+    def _get_skip_pages_count(self) -> int:
+        """
+        Determine how many initial pages to skip based on document language.
+        
+        Reads language from metadata JSON file.
+        Tamil documents: skip first 3 pages (cover, instructions, diagrams)
+        English documents: skip first 2 pages
+        
+        Returns:
+            Number of pages to skip
+        """
+        if not self.context.output_dir:
+            return DEFAULT_SKIP_PAGES
+        
+        # Find metadata JSON file in output directory
+        metadata_files = list(self.context.output_dir.glob("*-metadata.json"))
+        if not metadata_files:
+            self.log_debug("No metadata file found, using default skip pages")
+            return DEFAULT_SKIP_PAGES
+        
+        try:
+            metadata_path = metadata_files[0]
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            
+            languages = metadata.get("language_detected", [])
+            
+            if not languages:
+                self.log_debug("No language detected in metadata, using default")
+                return DEFAULT_SKIP_PAGES
+            
+            # Check if Tamil is the primary language
+            primary_language = languages[0].lower() if languages else ""
+            
+            if "tamil" in primary_language:
+                self.log_info(f"Tamil document detected, will skip first {TAMIL_SKIP_PAGES} pages")
+                return TAMIL_SKIP_PAGES
+            elif "english" in primary_language:
+                self.log_info(f"English document detected, will skip first {ENGLISH_SKIP_PAGES} pages")
+                return ENGLISH_SKIP_PAGES
+            else:
+                self.log_debug(f"Unknown language '{primary_language}', using default")
+                return DEFAULT_SKIP_PAGES
+                
+        except Exception as e:
+            self.log_warning(f"Error reading metadata for language detection: {e}")
+            return DEFAULT_SKIP_PAGES
     
     def validate(self) -> bool:
         """Validate prerequisites."""
@@ -281,6 +337,15 @@ class ImageCropper(BaseProcessor):
         
         self.log_info(f"Found {len(page_images)} page image(s)")
         
+        # Skip initial non-voter pages based on language
+        if self.skip_pages > 0 and len(page_images) > self.skip_pages:
+            skipped_pages = page_images[:self.skip_pages]
+            page_images = page_images[self.skip_pages:]
+            self.log_info(
+                f"Skipping first {self.skip_pages} pages (non-voter pages)",
+                skipped=[p.name for p in skipped_pages]
+            )
+        
         total_pages = len(page_images)
         processed = 0
         skipped = 0
@@ -353,7 +418,12 @@ class ImageCropper(BaseProcessor):
     
     def _process_page(self, img_path: Path) -> Optional[PageCropResult]:
         """
-        Process a single page image.
+        Process a single page image using two-step approach:
+        Step 1: Detect and classify boxes, save full OCR-preprocessed crops
+        Step 2: Apply field extraction to saved crops
+        
+        This separation ensures box detection/classification logic is not
+        affected by ROI-based field extraction.
         
         Args:
             img_path: Path to page image
@@ -439,17 +509,18 @@ class ImageCropper(BaseProcessor):
                 elapsed_seconds=elapsed,
             )
         
-        # Create crops directory
+        # ===== STEP 1: Detect, classify, and save FULL crops (without field extraction) =====
         crops_dir = self.context.crops_dir / page_id
         crops_saved = 0
         skipped_post_ocr = 0
         saved_crops: List[CroppedBox] = []
+        saved_paths: List[Path] = []  # Track paths for step 2
         
         for box in voter_candidates:
             crop = img_orig[box.y1:box.y2, box.x1:box.x2]
             ocr_img = self._ocr_preprocess(crop)
             
-            # Post-OCR edge check
+            # Post-OCR edge check (classification step)
             if self.diagram_filter != "off":
                 edges = cv2.Canny(ocr_img, 50, 150)
                 edge_frac = float(np.count_nonzero(edges)) / float(edges.size)
@@ -457,22 +528,24 @@ class ImageCropper(BaseProcessor):
                     skipped_post_ocr += 1
                     continue
             
-            # Apply field extraction to create compact image
-            compact_img = self._extract_fields(ocr_img)
-            
             # Create directory on first save
             if not crops_dir.exists():
                 crops_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save compact crop
+            # Save FULL OCR-preprocessed crop (without field extraction yet)
             crop_name = f"{page_id}-{box.box_index:03d}.png"
             out_path = crops_dir / crop_name
             
-            cv2.imwrite(str(out_path), compact_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+            cv2.imwrite(str(out_path), ocr_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
             
             box.output_path = out_path
             saved_crops.append(box)
+            saved_paths.append(out_path)
             crops_saved += 1
+        
+        # ===== STEP 2: Apply field extraction to saved crops =====
+        for out_path in saved_paths:
+            self._apply_field_extraction(out_path)
         
         elapsed = time.perf_counter() - page_start
         
@@ -493,6 +566,32 @@ class ImageCropper(BaseProcessor):
             elapsed_seconds=elapsed,
             crops=saved_crops,
         )
+    
+    def _apply_field_extraction(self, img_path: Path) -> None:
+        """
+        Apply field extraction to a saved crop image (Step 2).
+        
+        Reads the saved full crop, applies ROI-based field extraction,
+        and overwrites the file with the compact version.
+        
+        Args:
+            img_path: Path to the saved crop image
+        """
+        # Read the saved crop
+        img = cv2.imdecode(
+            np.fromfile(str(img_path), dtype=np.uint8),
+            cv2.IMREAD_GRAYSCALE
+        )
+        
+        if img is None:
+            self.log_warning(f"Could not read crop for field extraction: {img_path.name}")
+            return
+        
+        # Apply field extraction to create compact image
+        compact_img = self._extract_fields(img)
+        
+        # Overwrite the file with the compact version
+        cv2.imwrite(str(img_path), compact_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
     
     def _detect_boxes(self, img_canon: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """

@@ -489,6 +489,18 @@ def process_pdf(
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
         
+        # Save to PostgreSQL if configured
+        if config.db.is_configured:
+            logger.info("Saving to PostgreSQL database...")
+            try:
+                from src.persistence.postgres import PostgresRepository
+                db_repo = PostgresRepository(config.db)
+                db_repo.init_db()
+                if db_repo.save_document(document):
+                    logger.info("Successfully saved to database")
+            except Exception as e:
+                logger.error(f"Database operation failed: {e}")
+        
     # Step 6: CSV Export
     if args.csv or args.step == "csv":
         if document.status == "completed" or args.step == "csv":
@@ -666,6 +678,18 @@ def process_extracted_folder(
     if args.step in ["ocr", "all"]:
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
+
+        # Save to PostgreSQL if configured
+        if config.db.is_configured:
+            logger.info("Saving to PostgreSQL database...")
+            try:
+                from src.persistence.postgres import PostgresRepository
+                db_repo = PostgresRepository(config.db)
+                db_repo.init_db()
+                if db_repo.save_document(document):
+                    logger.info("Successfully saved to database")
+            except Exception as e:
+                logger.error(f"Database operation failed: {e}")
 
     # Step: CSV Export
     if args.csv or args.step == "csv":

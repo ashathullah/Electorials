@@ -39,13 +39,15 @@ Extract into this unified JSON structure:
 
   "administrative_address": {
     "town_or_village": null,
+    "main_town_or_village": null,
     "ward_number": null,
     "post_office": null,
     "police_station": null,
     "taluk_or_block": null,
     "subdivision": null,
     "district": null,
-    "pin_code": null
+    "pin_code": null,
+    "panchayat_name": null
   },
 
   "part_and_polling_details": {
@@ -101,6 +103,11 @@ TIPS FOR TAMIL DOCUMENTS:
 - "Part Number" appears as "பாகம் எண்".
 - "Section" appears as "பிரிவு".
 - "Year" appears as "ஆண்டு" or "வருடம்".
+- "Panchayat Union" or "Panchayat" appears as "ஊராட்சி ஒன்றியம்" or "ஊராட்சி".
+- "Main Town or Village" appears as "முக்கிய நகரம்/கிராமம்". Extract the English value if present.
+- "Taluk" or "Block" often appears as "வட்டம்".
+- "Subdivision" or "Division" often appears as "கோட்டம்".
+- "Post Office" often appears as "அஞ்சல் நிலையம்".
 
 the ward number should be a number
 

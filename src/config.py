@@ -235,6 +235,23 @@ class TopMergeConfig:
 
 
 @dataclass
+class DBConfig:
+    """Database configuration (PostgreSQL)."""
+    host: str = field(default_factory=lambda: os.getenv("DB_HOST", ""))
+    port: int = field(default_factory=lambda: _get_int_env("DB_PORT", 5432))
+    name: str = field(default_factory=lambda: os.getenv("DB_NAME", ""))
+    user: str = field(default_factory=lambda: os.getenv("DB_USER", ""))
+    password: str = field(default_factory=lambda: os.getenv("DB_PASSWORD", ""))
+    schema: str = field(default_factory=lambda: os.getenv("DB_SCHEMA", "public"))
+    ssl_mode: str = field(default_factory=lambda: os.getenv("DB_SSL_MODE", "prefer"))
+    
+    @property
+    def is_configured(self) -> bool:
+        """Check if minimal DB config is present."""
+        return bool(self.host and self.name and self.user)
+
+
+@dataclass
 class CropConfig:
     """Image cropping configuration."""
     # Canonical size for detection
@@ -290,6 +307,7 @@ class Config:
     crop: CropConfig = field(default_factory=CropConfig)
     merge: MergeConfig = field(default_factory=MergeConfig)
     top_merge: TopMergeConfig = field(default_factory=TopMergeConfig)
+    db: DBConfig = field(default_factory=DBConfig)
     
     # Processing limits
     default_limit: int = field(default_factory=lambda: _get_int_env("DEFAULT_LIMIT", 0))

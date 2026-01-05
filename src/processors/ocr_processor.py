@@ -1549,11 +1549,36 @@ class OCRProcessor(BaseProcessor):
         if not value:
             return ""
         
+        # Issue 1: Remove "தாயின்" or similar relation markers/labels from anywhere
+        # Aggressive removal for possessives/labels unlikely to be part of names
+        aggressive_words = ["தாயின்", "தந்தையின்", "கணவரின்", "வீட்டு", "வயது", "பாலினம்"]
+        for word in aggressive_words:
+            if word in value:
+                value = re.sub(rf"{word}", " ", value)
+        
+        # Word-boundary removal for words that might be part of names (e.g. தாய் in காத்தாயி)
+        # Only remove if they are standalone words
+        bounded_words = ["தாய்", "தந்தை", "கணவர்", "பெயர்", "பெயர", "எண்", 
+                         "Name", "Father", "Mother", "Husband", "Age", "Gender", "Photo"]
+        
+        for word in bounded_words:
+            if word in value:
+                # Use \b for word boundaries (works for Tamil in Python 3 regex)
+                # Case-insensitive for English words
+                value = re.sub(rf"\b{word}\b", " ", value, flags=re.IGNORECASE | re.UNICODE)
+
         # Remove leading colons, dashes, and special chars
         value = re.sub(r"^[:\-–—;,ஃ\s]+", "", value)
         
         # Remove trailing colons, dashes, and special chars
         value = re.sub(r"[:\-–—;,ஃ\s]+$", "", value)
+
+        # Issue 2: Keep only Tamil, English characters, spaces
+        # Replace other characters with space to separate words
+        value = re.sub(r"[^a-zA-Z\u0B80-\u0BFF\s]", " ", value)
+        
+        # Collapse multiple spaces
+        value = re.sub(r"\s+", " ", value).strip()
         
         # If the language context is English, remove Tamil characters
         # Check if value is predominantly English (Latin chars)
@@ -1760,7 +1785,10 @@ class OCRProcessor(BaseProcessor):
         for line in lines:
             if line.startswith("__RAW__:"):
                 words = line[8:].split("|")
-                return self._extract_relation_from_words(words)
+                rtype, rname = self._extract_relation_from_words(words)
+                if rname:
+                    rname = self._clean_extracted_value(rname)
+                return rtype, rname
         
         # Fallback to line-based extraction
         for line in lines:

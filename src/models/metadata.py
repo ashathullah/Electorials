@@ -62,9 +62,14 @@ class AdministrativeAddress:
     subdivision: str = ""
     district: str = ""
     pin_code: str = ""
+    panchayat_name: str = ""
+    main_town_or_village: str = ""
     
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+
 
 
 @dataclass
@@ -248,6 +253,8 @@ class DocumentMetadata:
             subdivision=addr_data.get("subdivision", ""),
             district=addr_data.get("district", ""),
             pin_code=addr_data.get("pin_code", ""),
+            panchayat_name=addr_data.get("panchayat_name", ""),
+            main_town_or_village=addr_data.get("main_town_or_village", ""),
         )
         
         # Polling details - check both field names

@@ -335,7 +335,8 @@ class JSONStore:
             "age",
             "gender",
             "house_no",
-            "street",
+            "house_no",
+            "street_names_and_numbers",
             "part_no",
             "assembly"
         ]
@@ -364,7 +365,7 @@ class JSONStore:
                 "age": r.get("age", ""),
                 "gender": r.get("gender", ""),
                 "house_no": r.get("house_no", ""),
-                "street": r.get("street") or r.get("section_number_and_name", ""),
+                "street_names_and_numbers": r.get("street") or r.get("section_number_and_name", ""),
                 "part_no": r.get("part_number", ""),
                 "assembly": r.get("assembly_constituency_number_and_name", "")
             }
@@ -444,14 +445,42 @@ class JSONStore:
             "language_detected", "page_number_current",
             "ai_metadata_provider", "ai_metadata_model",
             "metadata_document_id", 
-            "document_id" 
+            "document_id",
+            "ai_metadata_cost_usd",
+            "ai_metadata_extraction_time_sec",
+            "ai_metadata_input_tokens",
+            "ai_metadata_output_tokens",
+            "authority_verification_designation"
         }
         
-        final_meta_row = {k: v for k, v in meta_row.items() if k not in metadata_exclude}
+        # Also exclude keys starting with ai_metadata_voter
+        final_meta_row = {
+            k: v for k, v in meta_row.items() 
+            if k not in metadata_exclude and not k.startswith("ai_metadata_voter")
+        }
         
         # Ensure output_identifier is included if provided
         if output_identifier and "output_identifier" not in final_meta_row:
             final_meta_row["output_identifier"] = output_identifier
+
+        # Rename Panchayat Name column
+        if "administrative_address_panchayat_name" in final_meta_row:
+            final_meta_row["Panchayat Name"] = final_meta_row.pop("administrative_address_panchayat_name")
+
+        # Rename Main Town or Village column
+        if "administrative_address_main_town_or_village" in final_meta_row:
+            final_meta_row["Main Town or Village"] = final_meta_row.pop("administrative_address_main_town_or_village")
+
+        # Rename Taluk and Subdivision columns
+        if "administrative_address_taluk_or_block" in final_meta_row:
+            final_meta_row["Taluk or Block"] = final_meta_row.pop("administrative_address_taluk_or_block")
+        
+        if "administrative_address_subdivision" in final_meta_row:
+            final_meta_row["Subdivision"] = final_meta_row.pop("administrative_address_subdivision")
+
+        # Rename Post Office column
+        if "administrative_address_post_office" in final_meta_row:
+            final_meta_row["Post Office"] = final_meta_row.pop("administrative_address_post_office")
 
                 
         # Write metadata CSV (single row)

@@ -419,7 +419,7 @@ def process_pdf(
             logger.warning("Header extraction failed or no headers found")
     
     # Step 3.6: Merge crop-top images with filename labels
-    if args.step in ["top-merge", "all"]:
+    if args.step == "top-merge":
         logger.info("Step 3.6: Merging crop-top images...")
         
         top_merger = CropTopMerger(context)
@@ -599,7 +599,7 @@ def process_extracted_folder(
             logger.warning("Header extraction failed or no headers found")
     
     # Step: Merge crop-top images with filename labels
-    if args.step in ["top-merge", "all"]:
+    if args.step == "top-merge":
         logger.info("Merging crop-top images...")
         
         top_merger = CropTopMerger(context)

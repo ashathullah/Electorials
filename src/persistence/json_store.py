@@ -335,7 +335,6 @@ class JSONStore:
             "age",
             "gender",
             "house_no",
-            "house_no",
             "street_names_and_numbers",
             "part_no",
             "assembly",

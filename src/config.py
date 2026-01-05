@@ -100,15 +100,16 @@ class ROIConfig:
 @dataclass
 class AIConfig:
     """AI/LLM configuration for metadata extraction."""
-    provider: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "gemini"))
+    provider: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "Groq"))
     api_key: str = field(default_factory=lambda: os.getenv("AI_API_KEY", ""))
-    model: str = field(default_factory=lambda: os.getenv("AI_MODEL", "gemini-2.5-flash"))
-    base_url: str = field(default_factory=lambda: os.getenv("AI_BASE_URL", ""))
+    model: str = field(default_factory=lambda: os.getenv("AI_MODEL", "meta-llama/llama-4-maverick-17b-128e-instruct"))
+    base_url: str = field(default_factory=lambda: os.getenv("AI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions"))
     timeout_sec: int = field(default_factory=lambda: _get_int_env("AI_TIMEOUT_SEC", 120))
     response_format: str = field(
         default_factory=lambda: os.getenv("AI_RESPONSE_FORMAT", "").strip().lower()
     )
     batch_size: int = field(default_factory=lambda: _get_int_env("AI_OCR_BATCH_SIZE", 5))
+    id_batch_size: int = field(default_factory=lambda: _get_int_env("AI_ID_BATCH_SIZE", 3))
     
     # Retry configuration
     max_retries: int = field(default_factory=lambda: _get_int_env("AI_MAX_RETRIES", 3))
@@ -235,6 +236,12 @@ class TopMergeConfig:
 
 
 @dataclass
+class IDCropConfig:
+    """ID field crop and merge configuration."""
+    batch_size: int = field(default_factory=lambda: _get_int_env("ID_CROP_BATCH_SIZE", 10))
+
+
+@dataclass
 class DBConfig:
     """Database configuration (PostgreSQL)."""
     host: str = field(default_factory=lambda: os.getenv("DB_HOST", ""))
@@ -307,6 +314,7 @@ class Config:
     crop: CropConfig = field(default_factory=CropConfig)
     merge: MergeConfig = field(default_factory=MergeConfig)
     top_merge: TopMergeConfig = field(default_factory=TopMergeConfig)
+    id_crop: IDCropConfig = field(default_factory=IDCropConfig)
     db: DBConfig = field(default_factory=DBConfig)
     
     # Processing limits

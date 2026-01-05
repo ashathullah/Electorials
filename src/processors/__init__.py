@@ -24,6 +24,9 @@ from .ai_ocr_processor import AIOCRProcessor, FailedImage
 from .header_extractor import HeaderExtractor
 from .field_cropper import FieldCropper
 from .crop_top_merger import CropTopMerger
+from .id_field_cropper import IdFieldCropper
+from .id_field_merger import IdFieldMerger
+from .ai_id_processor import AIIdProcessor
 
 __all__ = [
     "BaseProcessor",
@@ -38,5 +41,8 @@ __all__ = [
     "HeaderExtractor",
     "FieldCropper",
     "CropTopMerger",
+    "IdFieldCropper",
+    "IdFieldMerger",
+    "AIIdProcessor",
 ]
 

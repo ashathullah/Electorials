@@ -146,8 +146,11 @@ class OCRResult:
     
     def to_voter(self, sequence_in_page: int = 0, sequence_in_document: int = 0) -> Voter:
         """Convert to Voter model."""
-        # Always use sequence_in_document as serial_no for consistent numbering
-        serial_no = str(sequence_in_document) if sequence_in_document > 0 else ""
+        # Use extracted serial_no if available (e.g. from AI), otherwise use sequence
+        if self.serial_no:
+            serial_no = self.serial_no
+        else:
+            serial_no = str(sequence_in_document) if sequence_in_document > 0 else ""
         
         # Calculate extraction confidence based on field completeness
         fields_present = sum([
@@ -211,6 +214,7 @@ class OCRProcessor(BaseProcessor):
         use_cuda: bool = True,
         use_merged: bool = False,
         use_tesseract: bool = False,
+        ai_id_processor: Optional[Any] = None,
         on_page_complete: Optional[callable] = None,
     ):
         """
@@ -234,6 +238,7 @@ class OCRProcessor(BaseProcessor):
         self.use_merged = use_merged
         self.use_tesseract = use_tesseract
         self.ocr_config = self.config.ocr  # Contains ROI configs
+        self.ai_id_processor = ai_id_processor
         self.page_results: List[PageOCRResult] = []
         self._ocr_initialized = False
         self.on_page_complete = on_page_complete
@@ -453,12 +458,46 @@ class OCRProcessor(BaseProcessor):
             page_records: List[OCRResult] = []
             page_start_time = time.perf_counter()
             
+            # Load AI ID extracted results for this page if available
+            ai_id_map = {}
+            if self.ai_id_processor:
+                 page_ai_results = self.ai_id_processor.get_results_for_page(page_id)
+                 if page_ai_results:
+                     self.log_info(f"Using {len(page_ai_results)} AI extracted ID records for page {page_id}")
+                     # Assuming order is preserved: item N corresponds to voter N on the page
+                     for idx, res in enumerate(page_ai_results, start=1):
+                         ai_id_map[idx] = res
+
             for batch_path in batch_images:
                 batch_records = self._process_batch_image(batch_path, page_id, voter_end_template)
+                
+                # Merge AI ID data if available
+                if ai_id_map:
+                    # Determine global index for this batch
+                    # batch_records contains results for voters in this batch
+                    # We need to map them to the page-level index
+                    # Assuming batch execution order matches
+                    start_idx = len(page_records) + 1 
+                    for i, record in enumerate(batch_records):
+                        current_idx = start_idx + i
+                        if current_idx in ai_id_map:
+                            ai_res = ai_id_map[current_idx]
+                            
+                            # Update fields if AI result exists
+                            if ai_res.serial_no:
+                                record.serial_no = ai_res.serial_no
+                            if ai_res.epic_no:
+                                record.epic_no = ai_res.epic_no
+                                record.epic_valid = True # AI is trusted
+                            if ai_res.house_no:
+                                record.house_no = ai_res.house_no
+                                
                 page_records.extend(batch_records)
                 total_batches += 1
             
             page_time = time.perf_counter() - page_start_time
+            merged_count = sum(1 for r in page_records if r.epic_valid and r.epic_no)
+            self.log_info(f"Completed page {page_id}: {len(page_records)} voters (AI merged: {len(ai_id_map) if ai_id_map else 0} records)")
             
             result = PageOCRResult(
                 page_id=page_id,

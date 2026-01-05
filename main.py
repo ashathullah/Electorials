@@ -72,7 +72,10 @@ from src.processors import (
     ImageMerger,
     OCRProcessor,
     HeaderExtractor,
+    HeaderExtractor,
     CropTopMerger,
+    IdFieldCropper,
+    IdFieldMerger,
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
 from src.utils.timing import Timer
@@ -149,9 +152,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "field-crop", "header", "merge", "top-merge", "ocr", "csv", "all"],
+        choices=["extract", "metadata", "crop", "field-crop", "id-crop", "header", "merge", "top-merge", "id-merge", "id-extract", "ocr", "csv", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'header' extracts page header info (assembly, section, part). 'field-crop' extracts data fields and stitches into compact images. 'top-merge' merges crop-top images with filename labels. 'csv' exports processing results to CSV.",
+        help="Run specific processing step (default: all). 'id-crop' crops ID fields (serial, epic, house) and stitches them. 'id-merge' merges these ID crops into batches.",
     )
     
     parser.add_argument(
@@ -428,6 +431,36 @@ def process_pdf(
                 f"Merged {top_merger.summary.total_images} crop-top images into "
                 f"{top_merger.summary.total_batch_files} batches"
             )
+
+    # Step: ID Field Cropping
+    if args.step in ["id-crop", "all"]:
+        logger.info("Step: ID Field Cropping...")
+        id_cropper = IdFieldCropper(context)
+        if id_cropper.run() and id_cropper.summary:
+             logger.info(
+                f"ID cropped {id_cropper.summary.successful_crops} images "
+                f"({id_cropper.summary.failed_crops} failed)"
+            )
+            
+    # Step: ID Field Merging
+    if args.step in ["id-merge", "all"]:
+        logger.info("Step: ID Field Merging...")
+        id_merger = IdFieldMerger(context)
+        if id_merger.run() and id_merger.summary:
+            logger.info(
+                f"Merged {id_merger.summary.total_images_merged} ID crops into "
+                f"{id_merger.summary.total_batch_files} batches"
+            )
+    
+    # Step: AI ID Extraction
+    ai_id_processor = None
+    if args.step in ["id-extract", "all"]:
+        logger.info("Step: AI ID (Serial/EPIC/House) Extraction...")
+        from src.processors import AIIdProcessor
+        ai_id_processor = AIIdProcessor(context)
+        if ai_id_processor.run():
+            logger.info("AI ID extraction complete")
+            # Keep the processor for OCR step integration
     
     # Step 4: Merge cropped images
     if args.step in ["merge", "all"]:
@@ -469,6 +502,7 @@ def process_pdf(
                 use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
                 use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
                 on_page_complete=save_page_callback,
+                ai_id_processor=ai_id_processor,
             )
 
         
@@ -620,6 +654,35 @@ def process_extracted_folder(
                 f"Merged {top_merger.summary.total_images} crop-top images into "
                 f"{top_merger.summary.total_batch_files} batches"
             )
+
+    # Step: ID Field Cropping
+    if args.step in ["id-crop", "all"]:
+        logger.info("ID Field Cropping...")
+        id_cropper = IdFieldCropper(context)
+        if id_cropper.run() and id_cropper.summary:
+             logger.info(
+                f"ID cropped {id_cropper.summary.successful_crops} images "
+                f"({id_cropper.summary.failed_crops} failed)"
+            )
+            
+    # Step: ID Field Merging
+    if args.step in ["id-merge", "all"]:
+        logger.info("ID Field Merging...")
+        id_merger = IdFieldMerger(context)
+        if id_merger.run() and id_merger.summary:
+            logger.info(
+                f"Merged {id_merger.summary.total_images_merged} ID crops into "
+                f"{id_merger.summary.total_batch_files} batches"
+            )
+    
+    # Step: AI ID Extraction
+    ai_id_processor = None
+    if args.step in ["id-extract", "all"]:
+        logger.info("AI ID (Serial/EPIC/House) Extraction...")
+        from src.processors import AIIdProcessor
+        ai_id_processor = AIIdProcessor(context)
+        if ai_id_processor.run():
+            logger.info("AI ID extraction complete")
     
     # Step: Merge cropped images
     if args.step in ["merge", "all"]:
@@ -661,6 +724,7 @@ def process_extracted_folder(
                 use_merged=not getattr(args, 'use_crops', False),  # Default: True (merged)
                 use_tesseract=not getattr(args, 'use_tamil_ocr', False),  # Default: True (tesseract)
                 on_page_complete=save_page_callback,
+                ai_id_processor=ai_id_processor,
             )
 
         
@@ -797,7 +861,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "field-crop", "merge", "top-merge", "ocr", "metadata", "csv"] and not args.paths:
+    if args.step in ["crop", "field-crop", "id-crop", "merge", "top-merge", "id-merge", "id-extract", "ocr", "metadata", "csv"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

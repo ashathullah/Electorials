@@ -231,7 +231,7 @@ class DocumentMetadata:
         metadata.output_identifier = response_data.get("output_identifier")
         
         # Constituency details
-        const_data = response_data.get("constituency_details", {})
+        const_data = response_data.get("constituency_details") or {}
         metadata.constituency_details = ConstituencyDetails(
             assembly_constituency_number=const_data.get("assembly_constituency_number"),
             assembly_constituency_name=const_data.get("assembly_constituency_name", ""),
@@ -243,7 +243,7 @@ class DocumentMetadata:
         )
         
         # Administrative address
-        addr_data = response_data.get("administrative_address", {})
+        addr_data = response_data.get("administrative_address") or {}
         metadata.administrative_address = AdministrativeAddress(
             town_or_village=addr_data.get("town_or_village", ""),
             ward_number=addr_data.get("ward_number", ""),
@@ -258,15 +258,14 @@ class DocumentMetadata:
         )
         
         # Polling details - check both field names
-        poll_data = response_data.get("part_and_polling_details", {})
-        if not poll_data:
-            poll_data = response_data.get("polling_details", {})
+        poll_data = response_data.get("part_and_polling_details") or response_data.get("polling_details") or {}
+        
         sections = [
             Section(
                 section_number=str(s.get("section_number", "")),
                 section_name=s.get("section_name", "")
             )
-            for s in poll_data.get("sections", [])
+            for s in poll_data.get("sections") or [] if s
         ]
         metadata.polling_details = PollingDetails(
             sections=sections,
@@ -278,10 +277,12 @@ class DocumentMetadata:
         )
         
         # Detailed elector summary
-        summary_data = response_data.get("detailed_elector_summary", {})
-        range_data = summary_data.get("serial_number_range", {})
+        summary_data = response_data.get("detailed_elector_summary") or {}
+        range_data = summary_data.get("serial_number_range") or {}
         
-        def make_elector_summary(data: dict) -> ElectorSummary:
+        def make_elector_summary(data: Optional[dict]) -> ElectorSummary:
+            if not data:
+                return ElectorSummary()
             return ElectorSummary(
                 male=data.get("male"),
                 female=data.get("female"),
@@ -294,13 +295,13 @@ class DocumentMetadata:
                 start=range_data.get("start"),
                 end=range_data.get("end"),
             ),
-            mother_roll=make_elector_summary(summary_data.get("mother_roll", {})),
-            additions=make_elector_summary(summary_data.get("additions", {})),
-            deletions=make_elector_summary(summary_data.get("deletions", {})),
+            mother_roll=make_elector_summary(summary_data.get("mother_roll")),
+            additions=make_elector_summary(summary_data.get("additions")),
+            deletions=make_elector_summary(summary_data.get("deletions")),
             gender_modification_difference=make_elector_summary(
-                summary_data.get("gender_modification_difference", {})
+                summary_data.get("gender_modification_difference")
             ),
-            net_total=make_elector_summary(summary_data.get("net_total", {})),
+            net_total=make_elector_summary(summary_data.get("net_total")),
         )
         
         # Authority verification

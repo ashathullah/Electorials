@@ -37,6 +37,8 @@ class ProcessingContext:
     images_dir: Optional[Path] = None
     crops_dir: Optional[Path] = None
     crop_top_dir: Optional[Path] = None  # Directory for header/top section crops
+    id_crops_dir: Optional[Path] = None
+    id_merged_dir: Optional[Path] = None
     output_dir: Optional[Path] = None
     
     # Processing statistics
@@ -66,6 +68,8 @@ class ProcessingContext:
         self.images_dir = self.extracted_dir / "images"
         self.crops_dir = self.extracted_dir / "crops"
         self.crop_top_dir = self.extracted_dir / "crop-top"  # Header crops
+        self.id_crops_dir = self.extracted_dir / "id-crops"
+        self.id_merged_dir = self.extracted_dir / "id-merged"
         self.output_dir = self.extracted_dir / "output"
         
         # Ensure directories exist
@@ -73,6 +77,8 @@ class ProcessingContext:
         self.images_dir.mkdir(exist_ok=True)
         self.crops_dir.mkdir(exist_ok=True)
         self.crop_top_dir.mkdir(exist_ok=True)
+        self.id_crops_dir.mkdir(exist_ok=True)
+        self.id_merged_dir.mkdir(exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
     
     def setup_paths_from_extracted(self, extracted_dir: Path) -> None:
@@ -87,10 +93,14 @@ class ProcessingContext:
         self.images_dir = extracted_dir / "images"
         self.crops_dir = extracted_dir / "crops"
         self.crop_top_dir = extracted_dir / "crop-top"  # Header crops
+        self.id_crops_dir = extracted_dir / "id-crops"
+        self.id_merged_dir = extracted_dir / "id-merged"
         self.output_dir = extracted_dir / "output"
         
         # Ensure directories exist
         self.crop_top_dir.mkdir(exist_ok=True)
+        self.id_crops_dir.mkdir(exist_ok=True)
+        self.id_merged_dir.mkdir(exist_ok=True)
         self.output_dir.mkdir(exist_ok=True)
 
 
@@ -222,10 +232,11 @@ class BaseProcessor(ABC):
         if isinstance(data, (dict, list)):
             debug_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8"
+                encoding="utf-8",
+                errors="replace"
             )
         else:
-            debug_path.write_text(str(data), encoding="utf-8")
+            debug_path.write_text(str(data), encoding="utf-8", errors="replace")
         
         self.log_debug(f"Saved debug info to {debug_path}")
         return debug_path

@@ -5,11 +5,12 @@ Your task is to:
 1. Read all visible text (English and Tamil) across both images.
 2. Merge the data into a single, unified JSON object.
 3. Use English field names for keys.
-4. Preserve the original language for descriptive values (Tamil or English). Do NOT translate names or addresses.
+4. Preserve the original language for descriptive values (Tamil or English). Do NOT translate names, addresses, or other descriptive fields. Extract the text EXACTLY as it appears in the image. If the text is in Tamil, output Tamil script.
 5. Numbers must be numeric types; Dates must remain in their original format.
 
 LANGUAGE RULE:
 - For "language_detected", provide a list of all languages present in the text (e.g., ["English", "Tamil"]).
+- PREFERENCE: If a field appears in both English and Tamil, prefer the TAMIL text for the value.
 
 Extract into this unified JSON structure:
 
@@ -96,18 +97,28 @@ STRUCTURE HINTS (Critical):
 1. Top Header: Look for "Assembly Constituency No. and Name" (e.g., "114-Tirupparankundram"). The number (114) is the 'assembly_constituency_number' and the name is 'assembly_constituency_name'.
 2. Part Number: distinct from the sequence number. Look for "Part No." or "No. & Name of Sections" followed by the part number (e.g., "Part No. 1").
 3. Summary Table (Back Page): A grid with rows for "Men", "Women", "Third Gender", "Total". Columns often include "Mother Roll", "Supplement 1", "Supplement 2" (or "Additions"/"Deletions").
+4. Polling Station Details: usually found below the "List of Sections" or in a dedicated "Polling Station Details" box.
+   - Look for "No. and Name of Polling Station" (or Tamil "வாக்குச்சாவடியின் எண் மற்றும் பெயர்"). This field contains BOTH the number and the name. split them if possible (e.g. "25-School" -> Num: 25, Name: School).
+   - "Polling Station Address" (or Tamil "வாக்குச்சாவடியின் முகவரி").
+   - "Polling Station Type" (or Tamil "வாக்குச்சாவடியின் வகைப்பாடு").
+   - "Number of Auxiliary Polling Stations" (or Tamil "துணைவாக்குச் சாவடிகளின் எண்ணிக்கை").
 
 TIPS FOR TAMIL DOCUMENTS:
 - "Assembly Constituency" often appears as "சட்டமன்றத் தொகுதி".
 - "Parliamentary Constituency" often appears as "நாடாளுமன்றத் தொகுதி".
 - "Part Number" appears as "பாகம் எண்".
+- "Total Pages" appears as "மொத்தப் பக்கங்கள்".
 - "Section" appears as "பிரிவு".
 - "Year" appears as "ஆண்டு" or "வருடம்".
 - "Panchayat Union" or "Panchayat" appears as "ஊராட்சி ஒன்றியம்" or "ஊராட்சி".
-- "Main Town or Village" appears as "முக்கிய நகரம்/கிராமம்". Extract the English value if present.
+- "Main Town or Village" appears as "முக்கிய நகரம்/கிராமம்".
 - "Taluk" or "Block" often appears as "வட்டம்".
 - "Subdivision" or "Division" often appears as "கோட்டம்".
 - "Post Office" often appears as "அஞ்சல் நிலையம்".
+- "Polling Station Number and Name" often appears as "வாக்குச்சாவடியின் எண் மற்றும் பெயர்".
+- "Polling Station Address" often appears as "வாக்குச்சாவடியின் முகவரி".
+- "Polling Station Type" often appears as "வாக்குச்சாவடியின் வகைப்பாடு" (Look for "ஆண்" (Male) / "பெண்" (Female) / "பொது" (General)).
+- "Auxiliary Polling Station Count" often appears as "துணைவாக்குச் சாவடிகளின் எண்ணிக்கை".
 
 the ward number should be a number
 

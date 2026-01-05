@@ -338,7 +338,8 @@ class JSONStore:
             "house_no",
             "street_names_and_numbers",
             "part_no",
-            "assembly"
+            "assembly",
+            "deleted"
         ]
         
         if output_identifier:
@@ -367,7 +368,8 @@ class JSONStore:
                 "house_no": r.get("house_no", ""),
                 "street_names_and_numbers": r.get("street") or r.get("section_number_and_name", ""),
                 "part_no": r.get("part_number", ""),
-                "assembly": r.get("assembly_constituency_number_and_name", "")
+                "assembly": r.get("assembly_constituency_number_and_name", ""),
+                "deleted": r.get("deleted", "")
             }
             
             if output_identifier:

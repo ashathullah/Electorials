@@ -125,6 +125,7 @@ class PostgresRepository:
                         page_id TEXT,
                         sequence_in_page INTEGER,
                         epic_valid BOOLEAN,
+                        deleted TEXT,  -- Empty string = not deleted, 'true' = deleted
                         
                         -- Additional data as JSONB
                         raw_data JSONB DEFAULT '{}',
@@ -292,7 +293,7 @@ class PostgresRepository:
                 relation_type, relation_name, 
                 father_name, mother_name, husband_name, other_name,
                 house_no, age, gender, street_names_and_numbers, part_no, assembly,
-                page_id, sequence_in_page, epic_valid, raw_data
+                page_id, sequence_in_page, epic_valid, deleted, raw_data
             ) VALUES %s
         """
         
@@ -326,6 +327,7 @@ class PostgresRepository:
             
             page_id = voter.page_id or page.page_id
             seq = voter.sequence_in_page
+            deleted = voter.deleted  # Empty string = not deleted, 'true' = deleted
             
             # Raw data
             raw = voter.to_dict()
@@ -351,6 +353,7 @@ class PostgresRepository:
                 page_id,
                 seq,
                 is_valid,
+                deleted,
                 Json(raw)
             ))
             

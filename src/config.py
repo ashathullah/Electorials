@@ -217,10 +217,10 @@ class OCRConfig:
     allow_next_line: bool = field(default_factory=lambda: _get_bool_env("OCR_ALLOW_NEXT_LINE", True))
     
     # ROI configurations (relative coordinates 0-1)
-    epic_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.65, 0.05, 0.98, 0.20))
-    serial_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.15, 0.06, 0.329, 0.2))
-    house_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.02, 0.42, 0.40, 0.54))
-
+    epic_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.449227, 0.009029, 0.839956, 0.162528))
+    serial_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.152318, 0.002257, 0.373068, 0.160271))
+    house_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.303532, 0.410835, 0.728477, 0.559819))
+    deleted_roi: ROIConfig = field(default_factory=lambda: ROIConfig(0.199338, 0.146727, 0.763797, 0.823928))
 
 @dataclass
 class MergeConfig:

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS voters (
     page_id TEXT,
     sequence_in_page INTEGER,
     epic_valid BOOLEAN,
+    deleted TEXT,  -- Empty string = not deleted, 'true' = deleted
     
     -- Additional data as JSONB
     raw_data JSONB DEFAULT '{}',

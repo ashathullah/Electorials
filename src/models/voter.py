@@ -44,6 +44,9 @@ class Voter:
     extraction_confidence: float = 0.0
     processing_method: str = ""
     
+    # Deletion status (empty string = not deleted, "true" = deleted)
+    deleted: str = ""
+    
     def __post_init__(self):
 
         """Validate and clean data after initialization."""

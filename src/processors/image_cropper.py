@@ -156,7 +156,7 @@ class ImageCropper(BaseProcessor):
         self.diagram_filter = diagram_filter
         self.page_results: List[PageCropResult] = []
         self.summary: Optional[CropSummary] = None
-        self.skip_pages = self._get_skip_pages_count()
+        self.skip_pages = 0  # Will be updated in process()
     
     def _get_skip_pages_count(self) -> int:
         """
@@ -336,6 +336,9 @@ class ImageCropper(BaseProcessor):
             return False
         
         self.log_info(f"Found {len(page_images)} page image(s)")
+        
+        # Update skip_pages from metadata (now that MetadataExtractor has likely run)
+        self.skip_pages = self._get_skip_pages_count()
         
         # Skip initial non-voter pages based on language
         if self.skip_pages > 0 and len(page_images) > self.skip_pages:

@@ -40,12 +40,13 @@ from .base import BaseProcessor, ProcessingContext
 from ..config import ROIConfig
 from ..models import Voter
 from ..exceptions import OCRProcessingError
+from ..utils.ai_deleted_detector import AIDeletedDetector
 
 
 # Character whitelists
 WL_EPIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 WL_DIGITS = "0123456789"
-WL_HOUSE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"
+WL_HOUSE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/- "
 
 # Label variants for field extraction
 NAME_LABELS = ["name", "பெயர்", "பெயர்‌"]
@@ -139,6 +140,7 @@ class OCRResult:
     house_no: str = ""
     age: str = ""
     gender: str = ""
+    deleted: str = ""  # Empty string = not deleted, "true" = deleted
     elapsed_seconds: float = 0.0
     error: Optional[str] = None
     
@@ -173,6 +175,7 @@ class OCRResult:
             epic_valid=self.epic_valid,
             processing_time_ms=round(self.elapsed_seconds * 1000, 2),
             extraction_confidence=round(extraction_confidence, 2),
+            deleted=self.deleted,
         )
 
 
@@ -237,6 +240,14 @@ class OCRProcessor(BaseProcessor):
         
         # Merged images directory - inside extracted folder
         self.merged_dir = self.context.extracted_dir / "merged" if self.context.extracted_dir else None
+        
+        # AI-based deleted detector for when OCR can't extract fields
+        # (used when relation_name, age, gender are all empty)
+        self._ai_deleted_detector = AIDeletedDetector(
+            api_key=self.config.ai.api_key,
+            base_url=self.config.ai.get_normalized_base_url(),
+            model=self.config.ai.model,
+        )
     
     def validate(self) -> bool:
         """Validate prerequisites."""
@@ -568,6 +579,13 @@ class OCRProcessor(BaseProcessor):
                 # Process the result
                 result = self._process_voter_result_from_lines(segment, lines, image_name)
                 
+                # Retry EPIC extraction from individual crop if invalid
+                if not result.epic_valid:
+                    retry_epic = self._retry_epic_from_crop(page_id, image_name)
+                    if retry_epic:
+                        result.epic_no = retry_epic
+                        result.epic_valid = True
+
                 # Retry age extraction from individual crop if invalid
                 if not self._is_valid_age(result.age):
                     retry_age = self._retry_age_from_crop(page_id, image_name)
@@ -602,6 +620,13 @@ class OCRProcessor(BaseProcessor):
                 
                 result = self._process_voter_result_from_ocr(segment, ocr_output, image_name)
                 
+                # Retry EPIC extraction from individual crop if invalid
+                if not result.epic_valid:
+                    retry_epic = self._retry_epic_from_crop(page_id, image_name)
+                    if retry_epic:
+                        result.epic_no = retry_epic
+                        result.epic_valid = True
+
                 # Retry age extraction from individual crop if invalid
                 if not self._is_valid_age(result.age):
                     retry_age = self._retry_age_from_crop(page_id, image_name)
@@ -664,6 +689,18 @@ class OCRProcessor(BaseProcessor):
             result.house_no = self._extract_house(lines, segment)
             result.age = self._extract_age(lines)
             result.gender = self._extract_gender(lines)
+            
+            # AI-based fallback when age is missing:
+            # If age could not be extracted, send to AI to get age and check for DELETED
+            if not result.age and self._ai_deleted_detector.is_available():
+                self.log_debug(f"Age missing for {image_name}, checking with AI...")
+                ai_result = self._ai_deleted_detector.extract_fields(image_array=segment)
+                if ai_result.age:
+                    result.age = ai_result.age
+                    self.log_info(f"AI extracted age: {ai_result.age} from {image_name}")
+                if ai_result.deleted:
+                    result.deleted = "true"
+                    self.log_info(f"AI detected DELETED mark on {image_name}")
             
         except Exception as e:
             result.error = str(e)
@@ -791,6 +828,55 @@ class OCRProcessor(BaseProcessor):
         except Exception as e:
             self.log_debug(f"Age retry error: {e}")
             return ""
+
+    def _retry_epic_from_crop(self, page_id: str, image_name: str) -> str:
+        """
+        Retry EPIC extraction from individual crop image.
+        """
+        if not self.context.crops_dir:
+            return ""
+        
+        # Find the individual crop image
+        crop_path = self.context.crops_dir / page_id / "images" / image_name
+        
+        if not crop_path.exists():
+            crop_path = self.context.crops_dir / page_id / image_name
+        
+        if not crop_path.exists():
+            return ""
+        
+        try:
+            img_bgr = cv2.imdecode(
+                np.fromfile(str(crop_path), dtype=np.uint8),
+                cv2.IMREAD_COLOR
+            )
+            
+            if img_bgr is None:
+                return ""
+            
+            # 1. Try ROI extraction first (fastest and often most accurate for EPIC)
+            epic = self._extract_epic(img_bgr)
+            if re.fullmatch(r"[A-Z]{3}\d+", epic):
+                self.log_debug(f"EPIC retry successful (ROI): {epic}")
+                return epic
+            
+            # 2. Try full OCR + Regex (fallback)
+            if self.use_tesseract:
+                lines = self._run_tesseract_ocr(crop_path, img_bgr)
+            else:
+                lines = self._run_tamil_ocr(crop_path, img_bgr)
+            
+            full_text = " ".join(lines)
+            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+            if match:
+                epic = match.group(1)
+                self.log_debug(f"EPIC retry successful (FullText): {epic}")
+                return epic
+                
+        except Exception as e:
+            self.log_debug(f"EPIC retry error: {e}")
+            
+        return ""
 
     def _split_by_voter_end(self, text: str) -> List[str]:
         """Split OCR text by voter_end markers."""
@@ -981,6 +1067,10 @@ class OCRProcessor(BaseProcessor):
                 result.age = self._extract_age(lines)
                 result.gender = self._extract_gender(lines)
                 
+                # Detect deleted mark (ROI-based detection)
+                if self._detect_deleted_mark(segment):
+                    result.deleted = "true"
+                
             finally:
                 # Clean up temp file
                 import os
@@ -1098,6 +1188,14 @@ class OCRProcessor(BaseProcessor):
             result.epic_no = self._extract_epic(img_bgr)
             result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
             
+            # Fallback: Check full text for EPIC if ROI failed
+            if not result.epic_valid:
+                full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
+                match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+                if match:
+                    result.epic_no = match.group(1)
+                    result.epic_valid = True
+            
             # Extract Serial from ROI
             result.serial_no = self._extract_serial(img_bgr)
             
@@ -1107,6 +1205,18 @@ class OCRProcessor(BaseProcessor):
             result.house_no = self._extract_house(lines, img_bgr)
             result.age = self._extract_age(lines)
             result.gender = self._extract_gender(lines)
+            
+            # AI-based fallback when age is missing:
+            # If age could not be extracted, send to AI to get age and check for DELETED
+            if not result.age and self._ai_deleted_detector.is_available():
+                self.log_debug(f"Age missing for {image_path.name}, checking with AI...")
+                ai_result = self._ai_deleted_detector.extract_fields(image_path=image_path)
+                if ai_result.age:
+                    result.age = ai_result.age
+                    self.log_info(f"AI extracted age: {ai_result.age} from {image_path.name}")
+                if ai_result.deleted:
+                    result.deleted = "true"
+                    self.log_info(f"AI detected DELETED mark on {image_path.name}")
             
         except Exception as e:
             result.error = str(e)
@@ -1282,6 +1392,18 @@ class OCRProcessor(BaseProcessor):
             result.age = self._extract_age(lines)
             result.gender = self._extract_gender(lines)
             
+            # AI-based fallback when age is missing:
+            # If age could not be extracted, send to AI to get age and check for DELETED
+            if not result.age and self._ai_deleted_detector.is_available():
+                self.log_debug(f"Age missing for {image_name}, checking with AI...")
+                ai_result = self._ai_deleted_detector.extract_fields(image_array=segment)
+                if ai_result.age:
+                    result.age = ai_result.age
+                    self.log_info(f"AI extracted age: {ai_result.age} from {image_name}")
+                if ai_result.deleted:
+                    result.deleted = "true"
+                    self.log_info(f"AI detected DELETED mark on {image_name}")
+            
         except Exception as e:
             result.error = str(e)
             self.log_debug(f"Extraction error for {image_name}: {e}")
@@ -1306,15 +1428,29 @@ class OCRProcessor(BaseProcessor):
         roi = self.ocr_config.epic_roi.as_tuple()
         epic_crop = self._crop_roi(img_bgr, roi)
         
+        # Add white border for better Tesseract recognition
+        epic_crop = cv2.copyMakeBorder(
+            epic_crop, 10, 10, 10, 10, 
+            cv2.BORDER_CONSTANT, value=[255, 255, 255]
+        )
+        
         # Preprocess
         gray = cv2.cvtColor(epic_crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.fastNlMeansDenoising(gray, None, h=8, templateWindowSize=7, searchWindowSize=21)
+        # Use Linear interpolation (cleaner for text than Cubic)
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        
+        # Use Otsu's binarization
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Ensure black text on white background
+        if float(np.mean(gray)) < 127:
+            gray = 255 - gray
         
         # Use Tesseract if available (better for alphanumeric with whitelist)
         if TESSERACT_AVAILABLE:
             try:
-                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_EPIC}"
+                # Use PSM 6 (uniform block) instead of 7 (single line)
+                config = f"--oem 1 --psm 6 -c tessedit_char_whitelist={WL_EPIC}"
                 txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
                 return self._clean_epic(txt.strip())
             except Exception:
@@ -1353,24 +1489,28 @@ class OCRProcessor(BaseProcessor):
         roi = self.ocr_config.serial_roi.as_tuple()
         serial_crop = self._crop_roi(img_bgr, roi)
         
-        # Preprocess
-        gray = cv2.cvtColor(serial_crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        gray = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 8
+        # Add white border
+        serial_crop = cv2.copyMakeBorder(
+            serial_crop, 10, 10, 10, 10, 
+            cv2.BORDER_CONSTANT, value=[255, 255, 255]
         )
         
-        # Invert if needed
-        if float(np.mean(gray)) > 180:
+        # Preprocess
+        gray = cv2.cvtColor(serial_crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        
+        # Otsu's binarization for cleaner digits
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Ensure black text on white background for Tesseract
+        if float(np.mean(gray)) < 127:
             gray = 255 - gray
         
         # Use Tesseract if available (better for digits with whitelist)
         if TESSERACT_AVAILABLE:
             try:
-                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_DIGITS}"
+                # PSM 6 (Uniform text block)
+                config = f"--oem 1 --psm 6 -c tessedit_char_whitelist={WL_DIGITS}"
                 txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
                 digits = re.sub(r"[^0-9]", "", txt)
                 if digits:
@@ -2189,17 +2329,28 @@ class OCRProcessor(BaseProcessor):
         """Extract house number from ROI as fallback using Tesseract."""
         roi = self.ocr_config.house_roi.as_tuple()
         house_crop = self._crop_roi(img_bgr, roi)
+
+        # Add white border
+        house_crop = cv2.copyMakeBorder(
+            house_crop, 10, 10, 10, 10, 
+            cv2.BORDER_CONSTANT, value=[255, 255, 255]
+        )
         
         gray = cv2.cvtColor(house_crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.fastNlMeansDenoising(gray, None, h=8, templateWindowSize=7, searchWindowSize=21)
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        # Use Otsu's binarization for consistency
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        if float(np.mean(gray)) < 127:
+            gray = 255 - gray
         
         txt = ""
         
         # Use Tesseract for house number (alphanumeric with whitelist) if available
         if TESSERACT_AVAILABLE:
             try:
-                config = f"--oem 1 --psm 7 -c tessedit_char_whitelist={WL_HOUSE}"
+                # PSM 6 for better block recognition
+                config = f"--oem 1 --psm 6 -c tessedit_char_whitelist={WL_HOUSE}"
                 txt = pytesseract.image_to_string(Image.fromarray(gray), lang="eng", config=config)
             except Exception:
                 pass

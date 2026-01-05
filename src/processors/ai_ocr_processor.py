@@ -333,6 +333,9 @@ class AIOCRProcessor(BaseProcessor):
             age=str(v_data.get("age", "")),
             gender=v_data.get("gender", ""),
             
+            # Deleted status (empty string = not deleted, "true" = deleted)
+            deleted=v_data.get("deleted", "") or "",
+            
             # Metadata
             page_id=page_id,
             image_file=f"{page_id}-ai_batch", 

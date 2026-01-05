@@ -1743,7 +1743,7 @@ class OCRProcessor(BaseProcessor):
                         # Check if it's a Tamil word (has Tamil characters)
                         if extra_word and re.search(r'[\u0B80-\u0BFF]', extra_word):
                             # Skip if it's a label word like பெயர்
-                            if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு"]):
+                            if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு", "வட்டு", "ட்டு"]):
                                 break
                             full_tamil_name += " " + extra_word
                         else:
@@ -1783,6 +1783,8 @@ class OCRProcessor(BaseProcessor):
 
                         value = re.sub(r"\s*எண்.*$", "", value)
                         value = re.sub(r"\s*வீட்டு.*$", "", value)
+                        value = re.sub(r"\s*வட்டு.*$", "", value)
+                        value = re.sub(r"\s+ட்டு.*$", "", value)
                         value = re.sub(r"\s*வயது.*$", "", value)
                         value = re.sub(r"\s*பாலினம்.*$", "", value)
                         value = value.strip()
@@ -1831,7 +1833,7 @@ class OCRProcessor(BaseProcessor):
                 break
         
         # Skip markers for both Tamil and English
-        skip_markers_tamil = ["வீட்டு", "எண்", "வயது", "பாலினம்"]
+        skip_markers_tamil = ["வீட்டு", "வட்டு", "ட்டு", "எண்", "வயது", "பாலினம்"]
         skip_markers_english = ["house", "age", "gender", "address", "no", "number"]
         skip_markers = skip_markers_tamil + skip_markers_english
         
@@ -1918,7 +1920,7 @@ class OCRProcessor(BaseProcessor):
                                     # Check if it's a Tamil word
                                     if extra_word and re.search(r'[\u0B80-\u0BFF]', extra_word):
                                         # Skip label words
-                                        if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு"]):
+                                        if any(label in extra_word for label in ["பெயர்", "பெயர", "எண்", "வயது", "பாலினம்", "வீட்டு", "வட்டு", "ட்டு"]):
                                             break
                                         full_tamil_rel += " " + extra_word
                                     else:
@@ -2025,6 +2027,10 @@ class OCRProcessor(BaseProcessor):
         if relation_name:
             # Remove leading colons, dashes, etc.
             relation_name = re.sub(r'^[:\-–—;,ஃ\s]+', '', relation_name)
+            # Remove trailing artifacts that might have slipped through
+            relation_name = re.sub(r"\s*வீட்டு.*$", "", relation_name)
+            relation_name = re.sub(r"\s*வட்டு.*$", "", relation_name)
+            relation_name = re.sub(r"\s+ட்டு.*$", "", relation_name)
             relation_name = relation_name.strip()
         
         return relation_type, relation_name

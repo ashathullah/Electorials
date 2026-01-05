@@ -17,15 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libgl1 \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Python dependencies ----
-COPY recruitment.txt .
-RUN pip install --no-cache-dir -r recruitment.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ---- Application code ----
 COPY . .
 
 # ---- Default command (1 booth run) ----
-ENTRYPOINT ["python", "main.py"]
+CMD ["python", "main.py"]

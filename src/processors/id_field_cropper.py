@@ -27,7 +27,7 @@ logger = get_logger("id_field_cropper")
 
 # Field ROI - House Number only
 # Format: (x1_frac, y1_frac, x2_frac, y2_frac)
-HOUSE_ROI = (0.303532, 0.410835, 0.728477, 0.559819)
+HOUSE_ROI = (0.303532, 0.410835, 0.65, 0.559819)
 
 
 @dataclass

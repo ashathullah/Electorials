@@ -535,6 +535,31 @@ def process_pdf(
             except Exception as e:
                 logger.error(f"Database operation failed: {e}")
         
+    # Step 5.5: Extract Missing House Numbers
+    if args.csv or args.step == "csv":
+        if document.status == "completed" or args.step == "csv":
+            # Check if there are any missing house numbers and extract them using AI
+            if document.pages:
+                logger.info("Step 5.5: Checking for missing house numbers...")
+                from src.processors import MissingHouseNumberProcessor
+                
+                missing_house_proc = MissingHouseNumberProcessor(context, document)
+                if missing_house_proc.run():
+                    if missing_house_proc.result:
+                        result = missing_house_proc.result
+                        if result.missing_house_count > 0:
+                            logger.info(
+                                f"Missing house numbers: found={result.missing_house_count}, "
+                                f"extracted={result.extracted_count}, failed={result.failed_count}"
+                            )
+                        else:
+                            logger.info("No missing house numbers found")
+                    
+                    # Update the saved document with corrected house numbers
+                    if result.extracted_count > 0:
+                        output_path = store.save_document(document)
+                        logger.info(f"Updated document with extracted house numbers: {output_path}")
+        
     # Step 6: CSV Export
     if args.csv or args.step == "csv":
         if document.status == "completed" or args.step == "csv":
@@ -755,6 +780,32 @@ def process_extracted_folder(
             except Exception as e:
                 logger.error(f"Database operation failed: {e}")
 
+    # Step: Missing House Numbers Extraction
+    if args.csv or args.step == "csv":
+        # If we just ran OCR, document is populated
+        if args.step in ["ocr", "all"] and document.status == "completed":
+            # Check if there are any missing house numbers and extract them using AI
+            if document.pages:
+                logger.info("Checking for missing house numbers...")
+                from src.processors import MissingHouseNumberProcessor
+                
+                missing_house_proc = MissingHouseNumberProcessor(context, document)
+                if missing_house_proc.run():
+                    if missing_house_proc.result:
+                        result = missing_house_proc.result
+                        if result.missing_house_count > 0:
+                            logger.info(
+                                f"Missing house numbers: found={result.missing_house_count}, "
+                                f"extracted={result.extracted_count}, failed={result.failed_count}"
+                            )
+                        else:
+                            logger.info("No missing house numbers found")
+                    
+                    # Update the saved document with corrected house numbers
+                    if result.extracted_count > 0:
+                        output_path = store.save_document(document)
+                        logger.info(f"Updated document with extracted house numbers: {output_path}")
+
     # Step: CSV Export
     if args.csv or args.step == "csv":
         # If we just ran OCR, document is populated
@@ -769,9 +820,12 @@ def process_extracted_folder(
 
         # If we are ONLY running CSV step on existing folder
         elif args.step == "csv":
-            logger.info("Exporting existing data to CSV...")
+            logger.info("Loading existing data for CSV export...")
             existing_data = store.load_document(context.pdf_name)
             if existing_data:
+                # For CSV-only mode, we export the existing data as-is
+                # Missing house number extraction requires full document context and is only done during processing
+                logger.info("Exporting existing processed data to CSV...")
                 csv_paths = store.save_to_csv(existing_data, output_identifier=args.output_identifier)
                 logger.info(f"Exported CSVs to {context.pdf_name}/output/csv/")
                 

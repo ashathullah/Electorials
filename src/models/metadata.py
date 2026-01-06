@@ -92,19 +92,11 @@ class PollingDetails:
 class DetailedElectorSummary:
     """Detailed summary of electors with mother roll and modifications."""
     serial_number_range: SerialRange = field(default_factory=SerialRange)
-    mother_roll: ElectorSummary = field(default_factory=ElectorSummary)
-    additions: ElectorSummary = field(default_factory=ElectorSummary)
-    deletions: ElectorSummary = field(default_factory=ElectorSummary)
-    gender_modification_difference: ElectorSummary = field(default_factory=ElectorSummary)
     net_total: ElectorSummary = field(default_factory=ElectorSummary)
     
     def to_dict(self) -> dict[str, Any]:
         return {
             "serial_number_range": asdict(self.serial_number_range),
-            "mother_roll": self.mother_roll.to_dict(),
-            "additions": self.additions.to_dict(),
-            "deletions": self.deletions.to_dict(),
-            "gender_modification_difference": self.gender_modification_difference.to_dict(),
             "net_total": self.net_total.to_dict(),
         }
 
@@ -294,12 +286,6 @@ class DocumentMetadata:
             serial_number_range=SerialRange(
                 start=range_data.get("start"),
                 end=range_data.get("end"),
-            ),
-            mother_roll=make_elector_summary(summary_data.get("mother_roll")),
-            additions=make_elector_summary(summary_data.get("additions")),
-            deletions=make_elector_summary(summary_data.get("deletions")),
-            gender_modification_difference=make_elector_summary(
-                summary_data.get("gender_modification_difference")
             ),
             net_total=make_elector_summary(summary_data.get("net_total")),
         )

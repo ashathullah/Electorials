@@ -483,13 +483,8 @@ class OCRProcessor(BaseProcessor):
                         if current_idx in ai_id_map:
                             ai_res = ai_id_map[current_idx]
                             
-                            # Update fields if AI result exists
-                            if ai_res.serial_no:
-                                record.serial_no = ai_res.serial_no
-                            if ai_res.epic_no:
-                                record.epic_no = ai_res.epic_no
-                                record.epic_valid = True # AI is trusted
-                            if ai_res.house_no:
+                            # Update house_no if AI result exists and current value is empty
+                            if ai_res.house_no and not record.house_no:
                                 record.house_no = ai_res.house_no
                                 
                 page_records.extend(batch_records)
@@ -899,21 +894,100 @@ class OCRProcessor(BaseProcessor):
                 self.log_debug(f"EPIC retry successful (ROI): {epic}")
                 return epic
             
-            # 2. Try full OCR + Regex (fallback)
-            if self.use_tesseract:
-                lines = self._run_tesseract_ocr(crop_path, img_bgr)
-            else:
-                lines = self._run_tamil_ocr(crop_path, img_bgr)
-            
-            full_text = " ".join(lines)
-            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
-            if match:
-                epic = match.group(1)
-                self.log_debug(f"EPIC retry successful (FullText): {epic}")
+            # 2. Try OCR on just the cropped EPIC region
+            epic = self._retry_epic_from_roi_crop(img_bgr, image_name)
+            if epic:
+                self.log_debug(f"EPIC retry successful (ROI Crop OCR): {epic}")
                 return epic
+            
+            # 3. Try AI fallback on cropped EPIC region
+            if self._ai_deleted_detector.is_available():
+                self.log_info(f"EPIC invalid for {image_name}, trying AI extraction...")
+                epic = self._retry_epic_with_ai(img_bgr, image_name)
+                if epic:
+                    self.log_info(f"EPIC retry successful (AI): {epic}")
+                    return epic
                 
         except Exception as e:
             self.log_debug(f"EPIC retry error: {e}")
+            
+        return ""
+
+    def _retry_epic_from_roi_crop(self, img_bgr: np.ndarray, image_name: str) -> str:
+        """
+        Run OCR specifically on the EPIC ROI region.
+        
+        This crops just the EPIC field and runs full OCR on it,
+        which can help when the full-image OCR is noisy.
+        """
+        try:
+            # Crop the EPIC ROI
+            roi = self.ocr_config.epic_roi.as_tuple()
+            epic_crop = self._crop_roi(img_bgr, roi)
+            
+            if epic_crop.size == 0:
+                return ""
+            
+            # Add white border for better recognition
+            epic_crop = cv2.copyMakeBorder(
+                epic_crop, 10, 10, 10, 10, 
+                cv2.BORDER_CONSTANT, value=[255, 255, 255]
+            )
+            
+            # Run OCR on the cropped region
+            if self.use_tesseract:
+                lines = self._run_tesseract_ocr_on_segment(epic_crop)
+            else:
+                # For Tamil OCR, need to save temp file
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                    cv2.imwrite(str(tmp_path), epic_crop)
+                
+                try:
+                    lines = self._run_tamil_ocr(tmp_path, epic_crop)
+                finally:
+                    import os
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+            
+            # Extract EPIC from OCR text
+            full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
+            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+            if match:
+                return match.group(1)
+                
+        except Exception as e:
+            self.log_debug(f"EPIC ROI crop OCR error: {e}")
+            
+        return ""
+    
+    def _retry_epic_with_ai(self, img_bgr: np.ndarray, image_name: str) -> str:
+        """
+        Use AI to extract EPIC number from the cropped EPIC ROI.
+        
+        This is the final fallback when OCR fails.
+        """
+        try:
+            # Crop the EPIC ROI
+            roi = self.ocr_config.epic_roi.as_tuple()
+            epic_crop = self._crop_roi(img_bgr, roi)
+            
+            if epic_crop.size == 0:
+                return ""
+            
+            # Send to AI
+            ai_result = self._ai_deleted_detector.extract_fields(image_array=epic_crop)
+            
+            if ai_result.epic_no:
+                # Validate the format
+                if re.fullmatch(r"[A-Z]{3}\d{7,10}", ai_result.epic_no):
+                    return ai_result.epic_no
+                    
+        except Exception as e:
+            self.log_debug(f"EPIC AI extraction error: {e}")
             
         return ""
 

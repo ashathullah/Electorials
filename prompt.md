@@ -64,10 +64,6 @@ Extract into this unified JSON structure:
 
   "detailed_elector_summary": {
     "serial_number_range": { "start": null, "end": null },
-    "mother_roll": { "male": null, "female": null, "third_gender": null, "total": null },
-    "additions": { "male": null, "female": null, "third_gender": null, "total": null },
-    "deletions": { "male": null, "female": null, "third_gender": null, "total": null },
-    "gender_modification_difference": { "male": null, "female": null, "third_gender": null, "total": null },
     "net_total": { "male": null, "female": null, "third_gender": null, "total": null }
   },
 
@@ -88,7 +84,7 @@ Extract into this unified JSON structure:
 Rules for Extraction:
 - "roll_type" and "roll_identification": Capture exactly as printed (e.g., "Supplement 1" and "Special Summary Revision 2025").
 - "sections": Extract the numbered list of sections found in Part 2 of the front page.
-- "detailed_elector_summary": Map Roman numerals I (Mother Roll), II (Additions), III (Deletions), and IV (Gender Difference) from the back page table.
+- "detailed_elector_summary": Extract the serial number range and net total (by gender) from the back page summary table.
 - "signature_present": Return true if any physical signature, seal, or mark is visible on the authority line.
 - "voters": MUST be returned as an empty array [].
 - Set missing or illegible fields to null.
@@ -96,7 +92,7 @@ Rules for Extraction:
 STRUCTURE HINTS (Critical):
 1. Top Header: Look for "Assembly Constituency No. and Name" (e.g., "114-Tirupparankundram"). The number (114) is the 'assembly_constituency_number' and the name is 'assembly_constituency_name'.
 2. Part Number: distinct from the sequence number. Look for "Part No." or "No. & Name of Sections" followed by the part number (e.g., "Part No. 1").
-3. Summary Table (Back Page): A grid with rows for "Men", "Women", "Third Gender", "Total". Columns often include "Mother Roll", "Supplement 1", "Supplement 2" (or "Additions"/"Deletions").
+3. Summary Table (Back Page): A grid with rows for "Men", "Women", "Third Gender", "Total". Extract the net totals from this table.
 4. Polling Station Details: usually found below the "List of Sections" or in a dedicated "Polling Station Details" box.
    - Look for "No. and Name of Polling Station" (or Tamil "வாக்குச்சாவடியின் எண் மற்றும் பெயர்"). This field contains BOTH the number and the name. split them if possible (e.g. "25-School" -> Num: 25, Name: School).
    - "Polling Station Address" (or Tamil "வாக்குச்சாவடியின் முகவரி").

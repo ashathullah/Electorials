@@ -109,7 +109,7 @@ class AIConfig:
         default_factory=lambda: os.getenv("AI_RESPONSE_FORMAT", "").strip().lower()
     )
     batch_size: int = field(default_factory=lambda: _get_int_env("AI_OCR_BATCH_SIZE", 5))
-    id_batch_size: int = field(default_factory=lambda: _get_int_env("AI_ID_BATCH_SIZE", 3))
+    id_batch_size: int = field(default_factory=lambda: _get_int_env("AI_ID_BATCH_SIZE", 5))
     
     # Retry configuration
     max_retries: int = field(default_factory=lambda: _get_int_env("AI_MAX_RETRIES", 3))

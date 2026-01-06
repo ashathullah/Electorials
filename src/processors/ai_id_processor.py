@@ -1,7 +1,7 @@
 """
 AI ID Processor.
 
-Extracts Serial, EPIC, and House Number from stitched ID crop strips using AI Vision.
+Extracts House Numbers from cropped ID strips using AI Vision.
 """
 
 from __future__ import annotations
@@ -22,8 +22,6 @@ logger = get_logger("ai_id_processor")
 @dataclass
 class IdExtractionResult:
     """Result from AI ID extraction."""
-    serial_no: str
-    epic_no: str
     house_no: str
 
 
@@ -97,49 +95,64 @@ class AIIdProcessor(BaseProcessor):
             return False
             
         total_pages = len(merged_pages)
-        self.log_info(f"Processing ID extraction for {total_pages} pages using AI...")
         
-        for i, page_dir in enumerate(merged_pages, 1):
-            self.log_info(f"Processing page {i}/{total_pages}: {page_dir.name}")
-            self._process_page(page_dir)
+        # Collect all images with their page IDs
+        all_image_info = []  # List of (image_path, page_id)
+        
+        for page_dir in merged_pages:
+            page_id = page_dir.name
+            batch_images = sorted([
+                p for p in page_dir.iterdir() 
+                if p.is_file() and p.name.startswith("batch-") and p.suffix.lower() == ".png"
+            ])
+            
+            for img_path in batch_images:
+                all_image_info.append((img_path, page_id))
+        
+        total_images = len(all_image_info)
+        self.log_info(f"Processing {total_images} images from {total_pages} pages in batches of {self.batch_size}...")
+        
+        # Process in batches across pages
+        for i in range(0, total_images, self.batch_size):
+            batch_info = all_image_info[i:i + self.batch_size]
+            image_paths = [info[0] for info in batch_info]
+            page_ids = [info[1] for info in batch_info]
+            
+            # Process batch and get page-wise results
+            page_results_dict = self._process_image_batch(image_paths, page_ids)
+            
+            # Accumulate results
+            for page_id, results in page_results_dict.items():
+                if page_id not in self.page_results:
+                    self.page_results[page_id] = []
+                self.page_results[page_id].extend(results)
+        
+        # Save debug info for each page
+        for page_id, results in self.page_results.items():
+            self.save_debug_info(f"id_extract_{page_id}", [
+                {"house": r.house_no}
+                for r in results
+            ])
+            self.log_info(f"Extracted {len(results)} house numbers for {page_id}")
             
         return True
 
-    def _process_page(self, page_dir: Path):
-        """Process a single page of merged batches."""
-        page_id = page_dir.name
-        
-        # Get all batch images
-        batch_images = sorted([
-            p for p in page_dir.iterdir() 
-            if p.is_file() and p.name.startswith("batch-") and p.suffix.lower() == ".png"
-        ])
-        
-        if not batch_images:
-            return
-            
-        all_results = []
-        
-        # Process in chunks (batched API requests)
-        # However, the user said "send multiple images in a single request"
-        # So we group the batch_images themselves
-        
-        for i in range(0, len(batch_images), self.batch_size):
-            chunk = batch_images[i:i + self.batch_size]
-            results = self._process_image_batch(chunk)
-            all_results.extend(results)
-            
-        self.page_results[page_id] = all_results
-        
-        # Save intermediate results to debug/recover
-        self.save_debug_info(f"id_extract_{page_id}", [
-            {"serial": r.serial_no, "epic": r.epic_no, "house": r.house_no}
-            for r in all_results
-        ])
-
-    def _process_image_batch(self, image_paths: List[Path]) -> List[IdExtractionResult]:
+    def _process_image_batch(self, image_paths: List[Path], page_ids: List[str]) -> Dict[str, List[IdExtractionResult]]:
         """Send a batch of images to AI and parse response."""
         import base64
+        
+        # Build page mapping info for the prompt
+        page_mapping = {}
+        current_page = None
+        image_idx = 0
+        
+        for i, page_id in enumerate(page_ids):
+            if page_id not in page_mapping:
+                page_mapping[page_id] = []
+            page_mapping[page_id].append(i + 1)  # 1-indexed for clarity
+        
+        # Create mapping description
+        mapping_desc = ", ".join([f"{page_id}: image {','.join(map(str, imgs))}" for page_id, imgs in page_mapping.items()])
         
         messages = [
             {
@@ -147,33 +160,15 @@ class AIIdProcessor(BaseProcessor):
                 "content": [
                     {
                         "type": "text", 
-                        "text": """
-You are an expert OCR system for Indian Electoral Rolls.
-You are provided with images containing rows of cropped ID fields.
-Each row consists of 3 fields separated by vertical black lines:
-1. Serial Number (Left) - usually a simple number
-2. EPIC Number (Middle) - Alphanumeric ID (e.g., TN/23/123/456789 or ABC1234567)
-3. House Number (Right) - Can be alphanumeric (e.g., 12, 12/A, 4-23). Can be empty.
+                        "text": f"""
+Extract house numbers from electoral roll images. Return JSON object with page-wise arrays.
 
-The images are batches containing multiple rows (voters).
-For EACH row in EACH image provided, extract these 3 values.
+Images belong to: {mapping_desc}
 
-Return ONLY a valid JSON object with the following structure:
-{
-  "voters": [
-    {
-       "serial_no": "...",
-       "epic_no": "...",
-       "house_no": "..."
-    },
-    ...
-  ]
-}
+Process all rows top-to-bottom. Use "" for empty/illegible fields.
+DO NOT use markdown code blocks. Return raw JSON only.
 
-- Maintain the EXACT order of rows as they appear in the images (Top to Bottom).
-- If multiple images are provided, process them in order (Image 1 top-to-bottom, then Image 2...).
-- If a field is illegible or empty, use an empty string "".
-- Do not include markdown formatting (```json). Just the raw JSON.
+Example output: {{"page-004": ["12", "34/A"], "page-005": ["5-B", "", "123"]}}
                         """
                     }
                 ]
@@ -206,45 +201,78 @@ Return ONLY a valid JSON object with the following structure:
                     model=self.model,
                     messages=messages,
                     temperature=0,
-                    max_completion_tokens=4096,
-                    response_format={"type": "json_object"}
+                    max_completion_tokens=1024  # Reduced from 4096 since we only need simple array
                 )
                 
                 elapsed = time.perf_counter() - start_time
                 
-                # Track usage
+                # Track usage (separate from ai_metadata_voter)
                 if hasattr(completion, 'usage') and completion.usage:
-                    self.context.ai_usage.add_call(
-                        input_tokens=completion.usage.prompt_tokens,
-                        output_tokens=completion.usage.completion_tokens,
-                        cost_usd=self.config.ai.estimate_cost(
-                            completion.usage.prompt_tokens,
-                            completion.usage.completion_tokens
-                        )
-                    )
+                    input_tokens = completion.usage.prompt_tokens
+                    output_tokens = completion.usage.completion_tokens
+                    cost = self.config.ai.estimate_cost(input_tokens, output_tokens)
+                    
+                    # Track only in context.ai_usage (not in stats for metadata export)
+                    self.context.ai_usage.add_call(input_tokens, output_tokens, cost)
+                
                 
                 content = completion.choices[0].message.content
                 
-                # Parse JSON
+                # Strip markdown code blocks if present
+                content = content.strip()
+                if content.startswith("```"):
+                    # Remove opening ```json or ``` 
+                    lines = content.split('\n')
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    # Remove closing ```
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    content = '\n'.join(lines).strip()
+                
+                # Parse JSON - expect page-wise object: {"page-004": ["12", "34/A"], ...}
                 try:
                     data = json.loads(content)
-                    voters_data = data.get("voters", [])
                     
-                    results = []
-                    for v in voters_data:
-                        results.append(IdExtractionResult(
-                            serial_no=str(v.get("serial_no", "")).strip(),
-                            epic_no=str(v.get("epic_no", "")).strip(),
-                            house_no=str(v.get("house_no", "")).strip()
-                        ))
+                    results_dict = {}
                     
-                    self.log_info(f"Extracted {len(results)} records from {len(image_paths)} images in {elapsed:.2f}s")
-                    return results
+                    # Handle page-wise format (preferred)
+                    if isinstance(data, dict) and all(isinstance(v, list) for v in data.values()):
+                        # Page-wise format: {"page-004": ["12", "34"], "page-005": ["56"]}
+                        for page_id, house_numbers in data.items():
+                            page_results = []
+                            for house_no in house_numbers:
+                                page_results.append(IdExtractionResult(
+                                    house_no=str(house_no).strip()
+                                ))
+                            results_dict[page_id] = page_results
+                            
+                        total_extracted = sum(len(v) for v in results_dict.values())
+                        self.log_info(f"Extracted {total_extracted} house numbers from {len(image_paths)} images across {len(results_dict)} pages in {elapsed:.2f}s")
+                        return results_dict
+                    
+                    # Fallback: simple array format (distribute to first page_id)
+                    elif isinstance(data, list):
+                        house_numbers = data
+                        results = []
+                        for house_no in house_numbers:
+                            results.append(IdExtractionResult(
+                                house_no=str(house_no).strip()
+                            ))
+                        # Assign all results to first page
+                        if page_ids:
+                            results_dict[page_ids[0]] = results
+                        self.log_info(f"Extracted {len(results)} house numbers from {len(image_paths)} images in {elapsed:.2f}s")
+                        return results_dict
+                    
+                    else:
+                        self.log_error(f"Unexpected JSON format: {type(data)}")
+                        return {}
                     
                 except json.JSONDecodeError:
                     self.log_error(f"Failed to parse AI response as JSON: {content[:100]}...")
                     # Don't retry on parsing errors as the model output is likely deterministic or the issue is with the response handling
-                    return []
+                    return {}
                     
             except Exception as e:
                 is_last_attempt = attempt == max_retries
@@ -252,7 +280,7 @@ Return ONLY a valid JSON object with the following structure:
                 
                 if is_last_attempt:
                     self.log_error(f"AI API call completely failed after {max_retries+1} attempts: {e}")
-                    return []
+                    return {}
                 else:
                     self.log_warning(f"{error_msg}. Retrying in {retry_delay}s...")
                     time.sleep(retry_delay)

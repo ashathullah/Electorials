@@ -27,6 +27,7 @@ from .crop_top_merger import CropTopMerger
 from .id_field_cropper import IdFieldCropper
 from .id_field_merger import IdFieldMerger
 from .ai_id_processor import AIIdProcessor
+from .missing_house_processor import MissingHouseNumberProcessor
 
 __all__ = [
     "BaseProcessor",
@@ -44,5 +45,6 @@ __all__ = [
     "IdFieldCropper",
     "IdFieldMerger",
     "AIIdProcessor",
+    "MissingHouseNumberProcessor",
 ]
 

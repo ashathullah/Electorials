@@ -33,6 +33,7 @@ class AIFieldResult:
     """Result from AI field extraction."""
     age: str = ""  # Extracted age, empty if not readable
     deleted: bool = False  # True if DELETED mark detected
+    epic_no: str = ""  # Extracted EPIC number, empty if not readable
 
 
 def extract_fields_with_ai(
@@ -105,20 +106,24 @@ def extract_fields_with_ai(
         logger.debug(f"Failed to initialize OpenAI client: {e}")
         return result
     
-    # Prompt asking for age and deleted status
+    # Prompt asking for age, epic number, and deleted status
     prompt = """Look at this voter information image from an Indian electoral roll.
 
-1. Find the AGE (வயது) field and extract the age number
-2. Check if there is a "DELETED" stamp/mark covering the voter information
+1. Find the EPIC NUMBER field - it's typically a combination of 3 letters followed by 7 digits (e.g., ABC1234567)
+2. Find the AGE (வயது) field and extract the age number
+3. Check if there is a "DELETED" stamp/mark covering the voter information
 
 Reply in this exact format (nothing else):
+epic: <epic number or empty>
 age: <number or empty>
 deleted: <true or false>
 
 Example responses:
+epic: ABC1234567
 age: 45
 deleted: false
 
+epic: 
 age: 
 deleted: true"""
 
@@ -151,6 +156,12 @@ deleted: true"""
             
             # Parse response
             response_text = response.choices[0].message.content.strip().lower()
+            
+            # Extract EPIC number
+            epic_match = re.search(r'epic:\s*([A-Z]{3}\d{7,10})?', response_text, re.IGNORECASE)
+            if epic_match and epic_match.group(1):
+                result.epic_no = epic_match.group(1).upper()
+                logger.debug(f"AI extracted EPIC: {result.epic_no}")
             
             # Extract age
             age_match = re.search(r'age:\s*(\d+)?', response_text)

@@ -647,6 +647,18 @@ class OCRProcessor(BaseProcessor):
             inference_time = time.perf_counter() - batch_start
             self.log_debug(f"Batch inference for {len(valid_segments)} segments took {inference_time:.4f}s")
             
+            if self.dump_raw_ocr:
+                try:
+                    debug_data = []
+                    for i, res in enumerate(ocr_results):
+                        debug_data.append({
+                            "segment_index": i, 
+                            "data": res
+                        })
+                    self.save_debug_info(f"ocr_raw_{page_id}_{batch_path.stem}", debug_data)
+                except Exception as e:
+                    self.log_warning(f"Failed to save debug info: {e}")
+            
             # 3. Process Results
             for i, ocr_output in enumerate(ocr_results):
                 idx = valid_indices[i]
@@ -1689,6 +1701,7 @@ class OCRProcessor(BaseProcessor):
             
             if self.dump_raw_ocr:
                 self.log_debug(f"Tamil OCR result for {image_path.name}: {lines}")
+                self.save_debug_info(f"ocr_raw_{image_path.stem}", lines)
             
             return lines
             

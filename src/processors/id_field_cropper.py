@@ -90,7 +90,7 @@ class IdFieldCropper(BaseProcessor):
         if self.use_paddle:
             try:
                 # Initialize PaddleOCR (English, disabled angle classification for speed)
-                self.paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                self.paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
                 self.log_info("Initialized PaddleOCR for ID field extraction")
             except Exception as e:
                 self.log_warning(f"Failed to initialize PaddleOCR: {e}. Fallback to Tesseract.")

@@ -12,6 +12,20 @@ SERIAL_NO_ROI = (0.152318, 0.002257, 0.373068, 0.160271)
 
 from __future__ import annotations
 
+import json
+try:
+    import pytesseract
+    from PIL import Image
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+try:
+    from paddleocr import PaddleOCR
+    PADDLE_AVAILABLE = True
+except ImportError:
+    PADDLE_AVAILABLE = False
+
 import os
 import time
 from dataclasses import dataclass, field
@@ -29,8 +43,8 @@ logger = get_logger("id_field_cropper")
 
 # Field ROIs match USER request
 # Format: (x1_frac, y1_frac, x2_frac, y2_frac)
-EPIC_ROI = (0.449227, 0.009029, 0.839956, 0.162528)
-HOUSE_ROI = (0.303532, 0.410835, 0.728477, 0.559819)
+EPIC_ROI = (0.694260, 0.047244, 0.969095, 0.207349)
+HOUSE_ROI = (0.242826, 0.430446, 0.416115, 0.540682)
 SERIAL_NO_ROI = (0.152318, 0.002257, 0.373068, 0.160271)
 
 # Stitching settings
@@ -43,8 +57,11 @@ PADDING = 10          # Padding around fields if needed
 class IdCropResult:
     """Result of ID field cropping for a single voter image."""
     image_name: str
+    image_name: str
     output_path: Optional[Path] = None
     error: Optional[str] = None
+    epic_no: str = ""
+    house_no: str = ""
 
 
 @dataclass
@@ -65,6 +82,20 @@ class IdFieldCropper(BaseProcessor):
     def __init__(self, context: ProcessingContext):
         super().__init__(context)
         self.summary = IdFieldCropperSummary()
+        self.use_paddle = PADDLE_AVAILABLE
+        self.use_tesseract = TESSERACT_AVAILABLE and not self.use_paddle
+        self.perform_ocr = self.use_paddle or self.use_tesseract
+        
+        self.paddle_ocr = None
+        if self.use_paddle:
+            try:
+                # Initialize PaddleOCR (English, disabled angle classification for speed)
+                self.paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+                self.log_info("Initialized PaddleOCR for ID field extraction")
+            except Exception as e:
+                self.log_warning(f"Failed to initialize PaddleOCR: {e}. Fallback to Tesseract.")
+                self.use_paddle = False
+                self.use_tesseract = TESSERACT_AVAILABLE
 
     def validate(self) -> bool:
         """Validate prerequisites."""
@@ -107,8 +138,6 @@ class IdFieldCropper(BaseProcessor):
         max_workers = min(os.cpu_count() or 4, 8)
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            
             for page_dir in page_dirs:
                 # Create output dir for page
                 page_output_dir = self.context.id_crops_dir / page_dir.name
@@ -121,19 +150,40 @@ class IdFieldCropper(BaseProcessor):
                 ])
                 
                 total_images += len(images)
+                page_results = []
+                futures = []
                 
                 for img_path in images:
                     futures.append(
                         executor.submit(self._process_image, img_path, page_output_dir)
                     )
-            
-            # Collect results
-            for future in as_completed(futures):
-                result = future.result()
-                if result.error:
-                    failed += 1
-                else:
-                    successful += 1
+                
+                # Collect page results
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result.error:
+                        failed += 1
+                        page_results.append({
+                            "image": result.image_name,
+                            "error": result.error
+                        })
+                    else:
+                        successful += 1
+                        page_results.append({
+                            "image": result.image_name,
+                            "epic_no": result.epic_no,
+                            "house_no": result.house_no
+                        })
+                
+                # Save extraction results for this page
+                if self.perform_ocr:
+                    extraction_path = page_output_dir / "id_extraction.json"
+                    try:
+                        with open(extraction_path, "w", encoding="utf-8") as f:
+                            json.dump(page_results, f, indent=2, ensure_ascii=False)
+                        self.log_info(f"Saved {len(page_results)} ID records to {extraction_path}")
+                    except Exception as e:
+                        self.log_error(f"Failed to save extraction results for {page_dir.name}: {e}")
         
         self.summary.total_images = total_images
         self.summary.successful_crops = successful
@@ -177,6 +227,37 @@ class IdFieldCropper(BaseProcessor):
             # Validate crops
             if serial_crop.size == 0 or epic_crop.size == 0 or house_crop.size == 0:
                  return IdCropResult(img_path.name, error="Invalid ROI dimensions")
+
+            # OCR Extraction (if enabled)
+            epic_no, house_no = "", ""
+            if self.perform_ocr:
+                try:
+                    if self.use_paddle and self.paddle_ocr:
+                        # PaddleOCR expects path or numpy array
+                        # Extract EPIC
+                        res_epic = self.paddle_ocr.ocr(epic_crop, cls=False)
+                        if res_epic and res_epic[0]:
+                            # res is [[[[x,y],..], ("text", conf)], ...]
+                            # We just want the text with highest confidence or concatenate all?
+                            # Usually simple field, so take first line
+                            epic_no = res_epic[0][0][1][0].strip()
+                            
+                        # Extract House
+                        res_house = self.paddle_ocr.ocr(house_crop, cls=False)
+                        if res_house and res_house[0]:
+                            house_no = res_house[0][0][1][0].strip()
+                            
+                    elif self.use_tesseract:
+                       # Use Tesseract with English configuration as requested
+                       # For House, assuming numeric/alphanumeric. EPIC is definitely alphanumeric.
+                       # psm 7 = Treat the image as a single text line.
+                       # User requested "With only english configuration" -> lang='eng'
+                       # Serial No extraction removed as per request
+                       epic_no = pytesseract.image_to_string(epic_crop, lang='eng', config='--psm 7').strip()
+                       house_no = pytesseract.image_to_string(house_crop, lang='eng', config='--psm 7').strip()
+                except Exception as e:
+                    # Don't fail the whole process just because OCR failed
+                    pass
 
             # Resize to same height for clean stitching?
             # Or just center them vertically?
@@ -224,7 +305,12 @@ class IdFieldCropper(BaseProcessor):
             success, encoded = cv2.imencode(".png", stitched)
             if success:
                 encoded.tofile(str(output_path))
-                return IdCropResult(img_path.name, output_path=output_path)
+                return IdCropResult(
+                    img_path.name, 
+                    output_path=output_path,
+                    epic_no=epic_no,
+                    house_no=house_no
+                )
             else:
                 return IdCropResult(img_path.name, error="Failed to encode image")
 

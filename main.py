@@ -237,6 +237,12 @@ def parse_args() -> argparse.Namespace:
         help="Use AI (Groq) Vision for OCR extraction instead of local OCR.",
     )
 
+    parser.add_argument(
+        "--use-ai-id",
+        action="store_true",
+        help="Use AI to read ID fields (Serial, EPIC, House) instead of Tesseract (default: False).",
+    )
+
     
     parser.add_argument(
         "--no-csv",
@@ -454,7 +460,9 @@ def process_pdf(
     
     # Step: AI ID Extraction
     ai_id_processor = None
-    if args.step in ["id-extract", "all"]:
+    # Step: AI ID Extraction
+    ai_id_processor = None
+    if args.step == "id-extract" or (args.step == "all" and args.use_ai_id):
         logger.info("Step: AI ID (Serial/EPIC/House) Extraction...")
         from src.processors import AIIdProcessor
         ai_id_processor = AIIdProcessor(context)
@@ -677,7 +685,9 @@ def process_extracted_folder(
     
     # Step: AI ID Extraction
     ai_id_processor = None
-    if args.step in ["id-extract", "all"]:
+    # Step: AI ID Extraction
+    ai_id_processor = None
+    if args.step == "id-extract" or (args.step == "all" and args.use_ai_id):
         logger.info("AI ID (Serial/EPIC/House) Extraction...")
         from src.processors import AIIdProcessor
         ai_id_processor = AIIdProcessor(context)

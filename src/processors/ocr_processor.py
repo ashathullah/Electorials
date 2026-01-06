@@ -1170,11 +1170,28 @@ class OCRProcessor(BaseProcessor):
             self.log_debug(f"No images in {page_dir}")
             return PageOCRResult(page_id=page_id, images_processed=0, total_seconds=0.0)
         
+        # Load pre-extracted IDs from JSON if available
+        id_map = {}
+        if self.context.id_crops_dir:
+            json_path = self.context.id_crops_dir / page_id / "id_extraction.json"
+            if json_path.exists():
+                try:
+                    import json
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        for item in data:
+                            if "image" in item:
+                                id_map[item["image"]] = item
+                    self.log_info(f"Loaded {len(id_map)} pre-extracted ID records for {page_id}")
+                except Exception as e:
+                    self.log_warning(f"Failed to load ID extraction JSON: {e}")
+
         start_time = time.perf_counter()
         records: List[OCRResult] = []
         
         for idx, image_path in enumerate(images, start=1):
-            result = self._process_image(image_path)
+            extracted_data = id_map.get(image_path.name)
+            result = self._process_image(image_path, extracted_data=extracted_data)
             records.append(result)
             
             self.log_debug(
@@ -1192,14 +1209,15 @@ class OCRProcessor(BaseProcessor):
             records=records,
         )
     
-    def _process_image(self, image_path: Path) -> OCRResult:
+    def _process_image(self, image_path: Path, extracted_data: Optional[Dict[str, str]] = None) -> OCRResult:
         """
         Process a single voter image.
         
         Uses hybrid extraction:
-        1. EPIC via ROI extraction
-        2. Serial via ROI extraction
-        3. Other fields via Tamil OCR or Tesseract (based on use_tesseract flag)
+        1. Pre-extracted IDs (if available)
+        2. EPIC via ROI extraction
+        3. Serial via ROI extraction
+        4. Other fields via Tamil OCR or Tesseract (based on use_tesseract flag)
         """
         start_time = time.perf_counter()
         
@@ -1216,6 +1234,16 @@ class OCRProcessor(BaseProcessor):
             result.elapsed_seconds = time.perf_counter() - start_time
             return result
         
+        # Apply pre-extracted data if available
+        if extracted_data:
+            if extracted_data.get("epic_no"):
+                result.epic_no = extracted_data["epic_no"]
+                if re.match(r"[A-Z]{3}\d+", result.epic_no):
+                    result.epic_valid = True
+            if extracted_data.get("house_no"):
+                result.house_no = extracted_data["house_no"]
+
+        
         try:
             # Full OCR - use Tesseract or Tamil OCR based on flag
             if self.use_tesseract:
@@ -1224,8 +1252,9 @@ class OCRProcessor(BaseProcessor):
                 lines = self._run_tamil_ocr(image_path, img_bgr)
             
             # Extract EPIC from ROI (always uses Tesseract if available for best results)
-            result.epic_no = self._extract_epic(img_bgr)
-            result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+            if not result.epic_valid:
+                result.epic_no = self._extract_epic(img_bgr)
+                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
             
             # Fallback: Check full text for EPIC if ROI failed
             if not result.epic_valid:
@@ -1236,12 +1265,14 @@ class OCRProcessor(BaseProcessor):
                     result.epic_valid = True
             
             # Extract Serial from ROI
-            result.serial_no = self._extract_serial(img_bgr)
+            if not result.serial_no:
+                result.serial_no = self._extract_serial(img_bgr)
             
             # Extract fields from lines
             result.name = self._extract_name(lines)
             result.relation_type, result.relation_name = self._extract_relation(lines)
-            result.house_no = self._extract_house(lines, img_bgr)
+            if not result.house_no:
+                result.house_no = self._extract_house(lines, img_bgr)
             result.age = self._extract_age(lines)
             result.gender = self._extract_gender(lines)
             

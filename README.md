@@ -4,13 +4,28 @@ A Python application for extracting voter information from Indian Electoral Roll
 
 ## Features
 
-- **PDF Extraction**: Convert PDF pages to high-resolution images
-- **AI Metadata Extraction**: Extract document metadata (constituency, revision info) using multimodal AI
-- **Voter Box Detection**: Automatically detect and crop individual voter information boxes
-- **OCR Processing**: Extract structured voter data (EPIC, name, relation, address, age, gender)
-- **Multi-language Support**: English and Tamil (eng+tam) OCR
-- **AWS S3 Integration**: Process PDFs directly from S3 buckets
-- **Modular Architecture**: Easy to extend and maintain
+- **High-Accuracy OCR**: Uses advanced **Tamil OCR** library (`ocr_tamil`) and Tesseract for superior recognition of Tamil and English text.
+- **Robust Field Extraction**: Multi-stage extraction with fallback mechanisms:
+  - **EPIC Number**: Regex search -> Region of Interest (ROI) Crop -> **AI Fallback** (if OCR fails).
+  - **Age/Gender**: logic extraction -> AI Fallback.
+- **AI-Powered Recovery**: Automatically uses AI (Groq/Gemini) to recover missing data (EPIC, Age) or detect "Deleted" status.
+- **Smart Validation**: 
+  - Validates House Numbers (alphanumeric + standard separators only).
+  - Auto-corrects Serial Numbers based on document sequence.
+- **Performance Optimized**: 
+  - **Batch Inference**: Processes multiple voters in parallel using merged image batches.
+  - **Front-Page Metadata**: Restricts costly AI metadata extraction to the front page only.
+- **PDF Extraction**: Convert PDF pages to high-resolution images.
+- **AWS S3 Integration**: Process PDFs directly from S3 buckets.
+- **Modular Architecture**: Easy to extend and maintain.
+
+## Recent Updates (Jan 2026)
+- **EPIC AI Fallback**: Implemented a 3-layer extraction strategy for EPIC numbers. If standard OCR fails, the system crops the specific EPIC region and, if needed, sends it to the AI for precise character recognition.
+- **Enhanced OCR Integration**: Switched to optimized OCR engines for improved handling of bi-lingual (Tamil/English) voter cards.
+- **Data Quality Logic**: 
+  - Fixed House Number extraction to strictly allow `[A-Z0-9/-]` characters, removing noise.
+  - Replaced OCR-based Serial Numbering with reliable document-level sequencing to prevent "1, 1, 1" errors.
+- **Optimized Cropping**: Refined `id_field_cropper` to target specific fields more accurately.
 
 ## Project Structure
 
@@ -38,6 +53,8 @@ Electorials/
 │   │   ├── pdf_extractor.py     # PDF to images
 │   │   ├── metadata_extractor.py # AI metadata
 │   │   ├── image_cropper.py     # Voter box cropping
+│   │   ├── id_field_cropper.py  # Specific field cropper
+│   │   ├── image_merger.py      # Image batch merger
 │   │   └── ocr_processor.py     # OCR extraction
 │   │
 │   ├── persistence/       # Data storage
@@ -137,19 +154,41 @@ python main.py https://my-bucket.s3.ap-south-1.amazonaws.com/roll.pdf
 
 ### Run Specific Steps
 
+You can run individual processing steps using the `--step` argument:
+
 ```bash
-# Extract images only
+# Extract images only (Step 1)
 python main.py --step extract
 
-# Extract metadata only
+# Extract metadata using AI (Step 2)
 python main.py --step metadata
 
-# Crop voter boxes only
+# Crop voter boxes (Step 3)
 python main.py --step crop
 
-# Run OCR only
+# Crop specific ID fields (Sequence, EPIC, HouseNo)
+python main.py --step id-crop
+
+# Merge ID field crops into batches
+python main.py --step id-merge
+
+# Merge voter images into batches for faster OCR
+python main.py --step merge
+
+# Extract ID data (Sequence, EPIC, HouseNo) using AI
+python main.py --step id-extract
+
+# Run OCR only (Step 5)
 python main.py --step ocr
+
+# Export to CSV (Step 6)
+python main.py --step csv
+
+# Run everything (Default)
+python main.py --step all
 ```
+
+**Available steps:** `extract`, `metadata`, `crop`, `field-crop`, `id-crop`, `header`, `merge`, `top-merge`, `id-merge`, `id-extract`, `ocr`, `csv`, `all`.
 
 ### Process Existing Extracted Folders
 
@@ -177,16 +216,21 @@ DEBUG=1 python main.py
 python main.py --help
 
 Options:
-  --step {extract,metadata,crop,ocr,all}  Run specific step
-  --folder FOLDER                          Process specific folder
-  --list                                   List extracted folders
-  --force                                  Force reprocessing
-  --limit N                                Limit to first N items
-  --dpi DPI                                PDF rendering DPI (default: 200)
-  --languages LANG                         OCR languages (default: eng+tam)
-  --diagram-filter {auto,on,off}          Diagram filter mode
-  --skip-metadata                          Skip AI metadata extraction
-  --dump-raw-ocr                           Dump raw OCR for debugging
+  --step {extract,metadata,crop,field-crop,id-crop,header,merge,top-merge,id-merge,id-extract,ocr,csv,all}
+                                             Run specific step (default: all)
+  --folder FOLDER                            Process specific folder
+  --list                                     List extracted folders
+  --force                                    Force reprocessing
+  --limit N                                  Limit to first N items
+  --dpi DPI                                  PDF rendering DPI (default: 200)
+  --languages LANG                           OCR languages (default: eng+tam)
+  --diagram-filter {auto,on,off}             Diagram filter mode
+  --skip-metadata                            Skip AI metadata extraction
+  --dump-raw-ocr                             Dump raw OCR for debugging
+  --use-crops                                Use individual crop images instead of merged batches (slower)
+  --use-tamil-ocr                            Use Tamil OCR (ocr_tamil) instead of Tesseract
+  --use-ai-ocr                               Use AI (Groq/Vision) for OCR extraction
+  --no-csv                                   Disable CSV export
 ```
 
 ## Output Format
@@ -251,7 +295,7 @@ Options:
   "total_third_gender_electors": 2,
   "total_electors": 1052,
   "ai_metadata": {
-    "model": "gemini-2.5-flash",
+    "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
     "usage": {"prompt_tokens": 1500, "completion_tokens": 200}
   }
 }
@@ -272,9 +316,9 @@ Options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AI_PROVIDER` | AI provider (gemini, openai) | `gemini` |
+| `AI_PROVIDER` | AI provider (groq, gemini, openai) | `Groq` |
 | `AI_API_KEY` | API key for metadata extraction | Required |
-| `AI_MODEL` | AI model name | `gemini-2.5-flash` |
+| `AI_MODEL` | AI model name | `meta-llama/llama-4-maverick-17b-128e-instruct` |
 | `AI_BASE_URL` | API base URL | Provider default |
 | `AI_TIMEOUT_SEC` | Request timeout | `120` |
 
@@ -353,11 +397,3 @@ python ocr_processor.py
 ## License
 
 MIT License
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
-5. Submit a pull request

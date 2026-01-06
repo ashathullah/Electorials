@@ -763,7 +763,6 @@ class OCRProcessor(BaseProcessor):
                     # Assuming [bbox, text, conf] or similar
                     # Try to find the text part
                     text_part = str(item[0]) # naive fallback
-                    # If item structure is known (e.g. from paddleocr/easyocr)
                     # Let's try to stringify
                     clean_text = text_part.strip()
                     if clean_text:

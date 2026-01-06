@@ -392,7 +392,6 @@ class OCRProcessor(BaseProcessor):
                 page_voters = []
                 for idx, ocr_result in enumerate(result.records, start=1):
                     if not ocr_result.error:
-                        voter = ocr_result.to_voter(
                         sequence = idx
                         voter = ocr_result.to_voter(
                             sequence_in_page=sequence,
@@ -520,7 +519,6 @@ class OCRProcessor(BaseProcessor):
                 page_voters = []
                 for idx, ocr_result in enumerate(page_records, start=1):
                     if not ocr_result.error:
-                        voter = ocr_result.to_voter(
                         sequence = idx
                         voter = ocr_result.to_voter(
                             sequence_in_page=sequence,

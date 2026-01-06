@@ -491,9 +491,14 @@ class OCRProcessor(BaseProcessor):
                         if current_idx in ai_id_map:
                             ai_res = ai_id_map[current_idx]
                             
-                            # Update house_no if AI result exists and current value is empty
-                            if ai_res.house_no and not record.house_no:
+                            # Update house_no with AI result if it's valid
+                            # AI is more accurate, but we need to validate first to avoid
+                            # overwriting valid OCR with empty/invalid AI results (e.g., Tamil text)
+                            if ai_res.house_no and self._is_valid_house_number(ai_res.house_no):
                                 record.house_no = ai_res.house_no
+                            elif ai_res.house_no and not self._is_valid_house_number(ai_res.house_no):
+                                # Log when AI gives invalid result so we can keep OCR
+                                self.log_debug(f"AI house_no '{ai_res.house_no}' is invalid, keeping OCR result '{record.house_no}'")
                                 
                 page_records.extend(batch_records)
                 total_batches += 1
@@ -2552,6 +2557,36 @@ class OCRProcessor(BaseProcessor):
         cleaned = re.sub(r"[^A-Z0-9/\-]", "", fixed_token)
         
         return cleaned
+    
+    def _is_valid_house_number(self, house_no: str) -> bool:
+        """
+        Validate if a house number is valid.
+        
+        A valid house number must:
+        - Not be empty
+        - Contain at least one digit (to avoid pure Tamil text like "வீட்டு")
+        - Only contain allowed characters (alphanumeric, -, /, spaces, parentheses)
+        
+        Examples of valid formats:
+        - "2", "2A", "2-12", "2/12"
+        - "6 (2)", "2 (A)", "10 (1A)"
+        
+        Returns:
+            True if valid, False otherwise
+        """
+        if not house_no or not house_no.strip():
+            return False
+        
+        # Must contain at least one digit
+        if not any(c.isdigit() for c in house_no):
+            return False
+        
+        # Should only contain alphanumeric, -, /, spaces, and parentheses
+        # This filters out Tamil characters and other invalid chars
+        if not re.match(r"^[A-Za-z0-9/\-\s\(\)]+$", house_no.strip()):
+            return False
+        
+        return True
     
     def _fix_ocr_digits(self, text: str) -> str:
         """

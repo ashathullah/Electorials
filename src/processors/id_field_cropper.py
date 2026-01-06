@@ -1,13 +1,10 @@
 """
 ID Field Cropper processor.
 
-Crops serial_no, epic_no, and house_no from voter images and stitches them
-side-by-side with separators.
+Crops house_no from voter images.
 
-ROIs:
-EPIC_ROI = (0.449227, 0.009029, 0.839956, 0.162528)
+ROI:
 HOUSE_ROI = (0.303532, 0.410835, 0.728477, 0.559819)
-SERIAL_NO_ROI = (0.152318, 0.002257, 0.373068, 0.160271)
 """
 
 from __future__ import annotations
@@ -27,17 +24,11 @@ from ..logger import get_logger
 
 logger = get_logger("id_field_cropper")
 
-# Field ROIs match USER request
-# Format: (x1_frac, y1_frac, x2_frac, y2_frac)
-EPIC_ROI = (0.449227, 0.009029, 0.839956, 0.162528)
-HOUSE_ROI = (0.303532, 0.410835, 0.728477, 0.559819)
-SERIAL_NO_ROI = (0.152318, 0.002257, 0.373068, 0.160271)
 
-# Stitching settings
-SEPARATOR_WIDTH = 4
-SEPARATOR_COLOR = 0  # Black
-BG_COLOR = 255       # White
-PADDING = 10          # Padding around fields if needed
+# Field ROI - House Number only
+# Format: (x1_frac, y1_frac, x2_frac, y2_frac)
+HOUSE_ROI = (0.303532, 0.410835, 0.728477, 0.559819)
+
 
 @dataclass
 class IdCropResult:
@@ -57,7 +48,7 @@ class IdFieldCropperSummary:
 
 class IdFieldCropper(BaseProcessor):
     """
-    Crops specific ID fields (Serial, Epic, House) and merges them horizontally.
+    Crops the house number field from voter images.
     """
     
     name = "IdFieldCropper"
@@ -159,69 +150,25 @@ class IdFieldCropper(BaseProcessor):
             
             H, W = img.shape[:2]
             
-            # Helper to extract ROI
-            def get_roi(roi_def):
-                x1 = int(W * roi_def[0])
-                y1 = int(H * roi_def[1])
-                x2 = int(W * roi_def[2])
-                y2 = int(H * roi_def[3])
-                # Clamp coordinates
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
-                return img[y1:y2, x1:x2]
-
-            serial_crop = get_roi(SERIAL_NO_ROI)
-            epic_crop = get_roi(EPIC_ROI)
-            house_crop = get_roi(HOUSE_ROI)
+            # Extract house number ROI
+            x1 = int(W * HOUSE_ROI[0])
+            y1 = int(H * HOUSE_ROI[1])
+            x2 = int(W * HOUSE_ROI[2])
+            y2 = int(H * HOUSE_ROI[3])
             
-            # Validate crops
-            if serial_crop.size == 0 or epic_crop.size == 0 or house_crop.size == 0:
-                 return IdCropResult(img_path.name, error="Invalid ROI dimensions")
-
-            # Resize to same height for clean stitching?
-            # Or just center them vertically?
-            # Let's target the max height of the three
-            h1, w1 = serial_crop.shape
-            h2, w2 = epic_crop.shape
-            h3, w3 = house_crop.shape
+            # Clamp coordinates
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W, x2), min(H, y2)
             
-            target_h = max(h1, h2, h3)
+            house_crop = img[y1:y2, x1:x2]
             
-            def pad_to_height(crop, target_h):
-                h, w = crop.shape
-                if h == target_h:
-                    return crop
-                if h > target_h:
-                    # Should not happen since target_h is max
-                    return crop[:target_h, :]
-                
-                pad_top = (target_h - h) // 2
-                pad_bottom = target_h - h - pad_top
-                return cv2.copyMakeBorder(
-                    crop, pad_top, pad_bottom, 0, 0, 
-                    cv2.BORDER_CONSTANT, value=BG_COLOR
-                )
-
-            serial_crop = pad_to_height(serial_crop, target_h)
-            epic_crop = pad_to_height(epic_crop, target_h)
-            house_crop = pad_to_height(house_crop, target_h)
-            
-            # Create separator and padding
-            separator = np.full((target_h, SEPARATOR_WIDTH), SEPARATOR_COLOR, dtype=np.uint8)
-            padding = np.full((target_h, PADDING), BG_COLOR, dtype=np.uint8)
-            
-            # Stitch: Serial <pad> | <pad> Epic <pad> | <pad> House
-            stitched = np.hstack([
-                serial_crop,
-                padding, separator, padding,
-                epic_crop,
-                padding, separator, padding,
-                house_crop
-            ])
+            # Validate crop
+            if house_crop.size == 0:
+                 return IdCropResult(img_path.name, error="Invalid house number ROI dimensions")
             
             # Save
             output_path = output_dir / img_path.name
-            success, encoded = cv2.imencode(".png", stitched)
+            success, encoded = cv2.imencode(".png", house_crop)
             if success:
                 encoded.tofile(str(output_path))
                 return IdCropResult(img_path.name, output_path=output_path)
@@ -230,3 +177,4 @@ class IdFieldCropper(BaseProcessor):
 
         except Exception as e:
             return IdCropResult(img_path.name, error=str(e))
+

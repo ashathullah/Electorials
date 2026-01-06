@@ -2,10 +2,9 @@
 Metadata Extractor processor.
 
 Extracts document metadata from Electoral Roll PDFs using AI vision.
-Analyzes front page and back page (summary) to extract:
+Analyzes front page to extract:
 - Assembly/Parliamentary constituency info
 - Revision information
-- Total electors statistics
 - Languages
 """
 
@@ -47,8 +46,8 @@ class MetadataExtractor(BaseProcessor):
     """
     Extract metadata from Electoral Roll PDFs using AI.
     
-    Sends front page and back page (summary table) images to a multimodal
-    AI model to extract structured metadata.
+    Sends front page image to a multimodal AI model to extract
+    structured metadata.
     """
     
     name = "MetadataExtractor"
@@ -114,15 +113,14 @@ class MetadataExtractor(BaseProcessor):
         # Get sorted images
         images = self._get_sorted_images(images_dir)
         
-        if len(images) < 2:
-            self.log_warning(f"Need at least 2 images, found {len(images)}")
+        if len(images) < 1:
+            self.log_warning(f"Need at least 1 image, found {len(images)}")
             return False
         
-        # Select front and back pages
+        # Select front page only
         front_page = images[0]
-        back_page = self._pick_back_page(images)
         
-        self.log_info(f"Selected pages: front={front_page.name}, back={back_page.name}")
+        self.log_info(f"Selected page: front={front_page.name}")
         
         # Load prompt
         prompt_text = self.prompt_path.read_text(encoding="utf-8")
@@ -141,7 +139,6 @@ class MetadataExtractor(BaseProcessor):
                 content, ai_meta = self._call_ai(
                     prompt_text=prompt_text,
                     front_image=front_page,
-                    back_image=back_page,
                 )
                 
                 # Parse to validate
@@ -178,7 +175,7 @@ class MetadataExtractor(BaseProcessor):
                 is_last = attempt == max_retries
                 if is_last:
                     self.log_error(f"AI call failed after {max_retries + 1} attempts", error=e)
-                    self._save_error(str(e), front_page, back_page, None)
+                    self._save_error(str(e), front_page, None)
                     return False
                 
                 wait = retry_delay * (2 ** attempt)
@@ -391,15 +388,13 @@ class MetadataExtractor(BaseProcessor):
         self,
         prompt_text: str,
         front_image: Path,
-        back_image: Path,
     ) -> Tuple[str, dict[str, Any]]:
         """
-        Call AI model with front and back page images.
+        Call AI model with front page image.
         
         Args:
             prompt_text: System prompt
             front_image: Front page image path
-            back_image: Back page image path
         
         Returns:
             Tuple of (response content, AI metadata)
@@ -431,14 +426,10 @@ class MetadataExtractor(BaseProcessor):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Front page and back page images."},
+                        {"type": "text", "text": "Front page image."},
                         {
                             "type": "image_url",
                             "image_url": {"url": self._encode_image(front_image)}
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": self._encode_image(back_image)}
                         },
                     ],
                 },
@@ -618,7 +609,6 @@ class MetadataExtractor(BaseProcessor):
         self,
         error: str,
         front: Path,
-        back: Path,
         content: Optional[str]
     ) -> None:
         """Save error information for debugging."""
@@ -628,7 +618,6 @@ class MetadataExtractor(BaseProcessor):
             with raw_path.open("w", encoding="utf-8") as f:
                 f.write(f"ERROR: {error}\n")
                 f.write(f"front={front}\n")
-                f.write(f"back={back}\n")
                 if content:
                     f.write("\n--- MODEL OUTPUT (raw) ---\n")
                     f.write(content)

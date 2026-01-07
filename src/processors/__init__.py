@@ -28,6 +28,8 @@ from .id_field_cropper import IdFieldCropper
 from .id_field_merger import IdFieldMerger
 from .ai_id_processor import AIIdProcessor
 from .missing_house_processor import MissingHouseNumberProcessor
+from .id_horizontal_merger import IdHorizontalMerger, HorizontalStitchConfig
+from .ai_id_horizontal_processor import AIIdHorizontalProcessor
 
 __all__ = [
     "BaseProcessor",
@@ -46,5 +48,8 @@ __all__ = [
     "IdFieldMerger",
     "AIIdProcessor",
     "MissingHouseNumberProcessor",
+    "IdHorizontalMerger",
+    "HorizontalStitchConfig",
+    "AIIdHorizontalProcessor",
 ]
 

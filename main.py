@@ -76,6 +76,8 @@ from src.processors import (
     CropTopMerger,
     IdFieldCropper,
     IdFieldMerger,
+    IdHorizontalMerger,
+    AIIdHorizontalProcessor,
 )
 from src.utils.file_utils import iter_pdfs, iter_extracted_folders
 from src.utils.timing import Timer
@@ -152,9 +154,9 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--step",
-        choices=["extract", "metadata", "crop", "field-crop", "id-crop", "header", "merge", "top-merge", "id-merge", "id-extract", "ocr", "csv", "all"],
+        choices=["extract", "metadata", "crop", "field-crop", "id-crop", "header", "merge", "top-merge", "id-merge", "id-horizontal-merge", "id-extract", "id-horizontal-extract", "ocr", "csv", "all"],
         default="all",
-        help="Run specific processing step (default: all). 'id-crop' crops ID fields (serial, epic, house) and stitches them. 'id-merge' merges these ID crops into batches.",
+        help="Run specific processing step (default: all). 'id-crop' crops ID fields. 'id-horizontal-merge' stitches 5 pages horizontally. 'id-horizontal-extract' uses AI on horizontal strips.",
     )
     
     parser.add_argument(
@@ -442,9 +444,9 @@ def process_pdf(
                 f"({id_cropper.summary.failed_crops} failed)"
             )
             
-    # Step: ID Field Merging
-    if args.step in ["id-merge", "all"]:
-        logger.info("Step: ID Field Merging...")
+    # Step: ID Field Merging (Vertical - only when explicitly requested)
+    if args.step == "id-merge":
+        logger.info("Step: ID Field Merging (Vertical)...")
         id_merger = IdFieldMerger(context)
         if id_merger.run() and id_merger.summary:
             logger.info(
@@ -452,15 +454,38 @@ def process_pdf(
                 f"{id_merger.summary.total_batch_files} batches"
             )
     
-    # Step: AI ID Extraction
+    # Step: ID Horizontal Merging (Stitch 5 pages horizontally per strip) - DEFAULT
+    if args.step in ["id-horizontal-merge", "all"]:
+        logger.info("Step: ID Horizontal Merging (5 pages per strip)...")
+        id_h_merger = IdHorizontalMerger(context)
+        if id_h_merger.run() and id_h_merger.summary:
+            logger.info(
+                f"Created {id_h_merger.summary.total_strips_created} horizontal strips "
+                f"in {id_h_merger.summary.total_batches} batches "
+                f"from {id_h_merger.summary.total_pages} pages"
+            )
+    
+    # Step: AI ID Extraction (Vertical batches - only when explicitly requested)
     ai_id_processor = None
-    if args.step in ["id-extract", "all"]:
-        logger.info("Step: AI ID (Serial/EPIC/House) Extraction...")
+    if args.step == "id-extract":
+        logger.info("Step: AI ID (Serial/EPIC/House) Extraction (Vertical)...")
         from src.processors import AIIdProcessor
         ai_id_processor = AIIdProcessor(context)
         if ai_id_processor.run():
             logger.info("AI ID extraction complete")
             # Keep the processor for OCR step integration
+    
+    # Step: AI ID Horizontal Extraction (5 pages stitched horizontally) - DEFAULT
+    ai_id_horizontal_processor = None
+    if args.step in ["id-horizontal-extract", "all"]:
+        logger.info("Step: AI ID Horizontal Extraction (from horizontal strips)...")
+        ai_id_horizontal_processor = AIIdHorizontalProcessor(context)
+        if ai_id_horizontal_processor.run():
+            results = ai_id_horizontal_processor.get_all_results()
+            total_voters = sum(len(v) for v in results.values())
+            logger.info(f"AI ID horizontal extraction complete: {total_voters} records from {len(results)} pages")
+            # Keep the processor for OCR step integration
+            ai_id_processor = ai_id_horizontal_processor
     
     # Step 4: Merge cropped images
     if args.step in ["merge", "all"]:
@@ -705,9 +730,9 @@ def process_extracted_folder(
                 f"({id_cropper.summary.failed_crops} failed)"
             )
             
-    # Step: ID Field Merging
-    if args.step in ["id-merge", "all"]:
-        logger.info("ID Field Merging...")
+    # Step: ID Field Merging (Vertical - only when explicitly requested)
+    if args.step == "id-merge":
+        logger.info("ID Field Merging (Vertical)...")
         id_merger = IdFieldMerger(context)
         if id_merger.run() and id_merger.summary:
             logger.info(
@@ -715,14 +740,37 @@ def process_extracted_folder(
                 f"{id_merger.summary.total_batch_files} batches"
             )
     
-    # Step: AI ID Extraction
+    # Step: ID Horizontal Merging (Stitch 5 pages horizontally per strip) - DEFAULT
+    if args.step in ["id-horizontal-merge", "all"]:
+        logger.info("ID Horizontal Merging (5 pages per strip)...")
+        id_h_merger = IdHorizontalMerger(context)
+        if id_h_merger.run() and id_h_merger.summary:
+            logger.info(
+                f"Created {id_h_merger.summary.total_strips_created} horizontal strips "
+                f"in {id_h_merger.summary.total_batches} batches "
+                f"from {id_h_merger.summary.total_pages} pages"
+            )
+    
+    # Step: AI ID Extraction (Vertical batches - only when explicitly requested)
     ai_id_processor = None
-    if args.step in ["id-extract", "all"]:
-        logger.info("AI ID (Serial/EPIC/House) Extraction...")
+    if args.step == "id-extract":
+        logger.info("AI ID (Serial/EPIC/House) Extraction (Vertical)...")
         from src.processors import AIIdProcessor
         ai_id_processor = AIIdProcessor(context)
         if ai_id_processor.run():
             logger.info("AI ID extraction complete")
+    
+    # Step: AI ID Horizontal Extraction (5 pages stitched horizontally) - DEFAULT
+    ai_id_horizontal_processor = None
+    if args.step in ["id-horizontal-extract", "all"]:
+        logger.info("AI ID Horizontal Extraction (from horizontal strips)...")
+        ai_id_horizontal_processor = AIIdHorizontalProcessor(context)
+        if ai_id_horizontal_processor.run():
+            results = ai_id_horizontal_processor.get_all_results()
+            total_voters = sum(len(v) for v in results.values())
+            logger.info(f"AI ID horizontal extraction complete: {total_voters} records from {len(results)} pages")
+            # Keep the processor for OCR step integration
+            ai_id_processor = ai_id_horizontal_processor
     
     # Step: Merge cropped images
     if args.step in ["merge", "all"]:
@@ -945,7 +993,7 @@ def main() -> int:
     
     results: List[ProcessedDocument] = []
     
-    if args.step in ["crop", "field-crop", "id-crop", "merge", "top-merge", "id-merge", "id-extract", "ocr", "metadata", "csv"] and not args.paths:
+    if args.step in ["crop", "field-crop", "id-crop", "merge", "top-merge", "id-merge", "id-horizontal-merge", "id-extract", "id-horizontal-extract", "ocr", "metadata", "csv"] and not args.paths:
         # Process extracted folders for metadata, crop, or ocr steps
         folders = list(iter_extracted_folders(config.extracted_dir))
         

@@ -85,6 +85,48 @@ from src.utils.s3_utils import is_s3_url, download_from_s3, upload_to_s3
 logger = get_logger("main")
 
 
+def retry_database_operation(operation_func, operation_name: str, max_retries: int = 3, wait_seconds: int = 5) -> bool:
+    """
+    Retry a database operation with exponential backoff.
+    
+    Args:
+        operation_func: Function to execute (should return True on success, False on failure)
+        operation_name: Name of the operation for logging
+        max_retries: Maximum number of retry attempts
+        wait_seconds: Seconds to wait between retries
+        
+    Returns:
+        True if operation succeeded, False otherwise
+    """
+    import psycopg2
+    
+    for attempt in range(max_retries):
+        try:
+            result = operation_func()
+            if result:
+                logger.info(f"✓ {operation_name} succeeded")
+                return True
+            else:
+                logger.warning(f"✗ {operation_name} returned False")
+                return False
+                
+        except psycopg2.OperationalError as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Database connection error during {operation_name}: {e}")
+                logger.info(f"Retrying {operation_name} (Attempt {attempt + 2}/{max_retries})...")
+                time.sleep(wait_seconds)
+                continue
+            else:
+                logger.error(f"Failed {operation_name} after {max_retries} attempts due to connection errors")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Database operation failed ({operation_name}): {e}", exc_info=True)
+            return False
+    
+    return False
+
+
 def resolve_pdf_path(path_str: str, config: Config) -> Optional[Path]:
     """
     Resolve a PDF path from string input.
@@ -568,14 +610,18 @@ def process_pdf(
         # Save to PostgreSQL if configured
         if config.db.is_configured:
             logger.info("Saving to PostgreSQL database...")
-            try:
+            
+            def save_to_db():
                 from src.persistence.postgres import PostgresRepository
                 db_repo = PostgresRepository(config.db)
                 db_repo.init_db()
-                if db_repo.save_document(document):
-                    logger.info("Successfully saved to database")
-            except Exception as e:
-                logger.error(f"Database operation failed: {e}")
+                return db_repo.save_document(document)
+            
+            retry_database_operation(
+                save_to_db,
+                f"Save document {document.pdf_name} to database"
+            )
+        
         
     # Step 5.5: Extract Missing House Numbers
     if args.csv or args.step == "csv":
@@ -655,17 +701,20 @@ def process_pdf(
             # Update Database after CSV (ensures output_identifier and any late updates are saved)
             if config.db.is_configured and document.status == "completed":
                 logger.info("Updating PostgreSQL database after CSV generation...")
-                try:
+                
+                def update_db():
                     from src.persistence.postgres import PostgresRepository
                     db_repo = PostgresRepository(config.db)
                     # Ensure output_identifier is in metadata if provided
                     if args.output_identifier and document.metadata:
                         document.metadata.output_identifier = args.output_identifier
-                    
-                    if db_repo.save_document(document):
-                        logger.info("Successfully updated database")
-                except Exception as e:
-                    logger.error(f"Database update failed: {e}")
+                    return db_repo.save_document(document)
+                
+                retry_database_operation(
+                    update_db,
+                    f"Update document {document.pdf_name} in database after CSV"
+                )
+        
     
     return document
 
@@ -881,14 +930,18 @@ def process_extracted_folder(
         # Save to PostgreSQL if configured
         if config.db.is_configured:
             logger.info("Saving to PostgreSQL database...")
-            try:
+            
+            def save_to_db():
                 from src.persistence.postgres import PostgresRepository
                 db_repo = PostgresRepository(config.db)
                 db_repo.init_db()
-                if db_repo.save_document(document):
-                    logger.info("Successfully saved to database")
-            except Exception as e:
-                logger.error(f"Database operation failed: {e}")
+                return db_repo.save_document(document)
+            
+            retry_database_operation(
+                save_to_db,
+                f"Save extracted folder {document.pdf_name} to database"
+            )
+
 
     # Step: Missing House Numbers Extraction
     if args.csv or args.step == "csv":
@@ -931,17 +984,20 @@ def process_extracted_folder(
             # Update Database after CSV
             if config.db.is_configured and document.status == "completed":
                 logger.info("Updating PostgreSQL database after CSV generation...")
-                try:
+                
+                def update_db():
                     from src.persistence.postgres import PostgresRepository
                     db_repo = PostgresRepository(config.db)
                     # Ensure output_identifier is in metadata if provided
                     if args.output_identifier and document.metadata:
                         document.metadata.output_identifier = args.output_identifier
-                    
-                    if db_repo.save_document(document):
-                        logger.info("Successfully updated database")
-                except Exception as e:
-                    logger.error(f"Database update failed: {e}")
+                    return db_repo.save_document(document)
+                
+                retry_database_operation(
+                    update_db,
+                    f"Update extracted folder {document.pdf_name} in database after CSV"
+                )
+
 
         # If we are ONLY running CSV step on existing folder
         elif args.step == "csv":

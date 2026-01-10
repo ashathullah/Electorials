@@ -406,7 +406,33 @@ class S3ToDBSyncer:
                 %s, %s, %s,
                 %s
             )
-            ON CONFLICT (document_id) DO NOTHING
+            ON CONFLICT (document_id) DO UPDATE SET
+                pdf_name = EXCLUDED.pdf_name,
+                state = EXCLUDED.state,
+                year = EXCLUDED.year,
+                revision_type = EXCLUDED.revision_type,
+                qualifying_date = EXCLUDED.qualifying_date,
+                publication_date = EXCLUDED.publication_date,
+                roll_type = EXCLUDED.roll_type,
+                roll_identification = EXCLUDED.roll_identification,
+                total_pages = EXCLUDED.total_pages,
+                total_voters_extracted = EXCLUDED.total_voters_extracted,
+                town_or_village = EXCLUDED.town_or_village,
+                main_town_or_village = EXCLUDED.main_town_or_village,
+                ward_number = EXCLUDED.ward_number,
+                post_office = EXCLUDED.post_office,
+                police_station = EXCLUDED.police_station,
+                taluk_or_block = EXCLUDED.taluk_or_block,
+                subdivision = EXCLUDED.subdivision,
+                district = EXCLUDED.district,
+                pin_code = EXCLUDED.pin_code,
+                panchayat_name = EXCLUDED.panchayat_name,
+                constituency_details = EXCLUDED.constituency_details,
+                administrative_address = EXCLUDED.administrative_address,
+                polling_details = EXCLUDED.polling_details,
+                detailed_elector_summary = EXCLUDED.detailed_elector_summary,
+                authority_verification = EXCLUDED.authority_verification,
+                output_identifier = EXCLUDED.output_identifier
         """
         
         # Parse JSON fields (they might be strings in CSV)
@@ -467,6 +493,20 @@ class S3ToDBSyncer:
         if self.dry_run:
             logger.info(f"[DRY RUN] Would insert {len(voters)} voters")
             return
+        
+        # Get document_id from first voter (all voters should have same document_id)
+        document_id = voters[0].get('document_id') if voters else None
+        if not document_id:
+            logger.error("Cannot insert voters: no document_id found")
+            return
+            
+        # Delete existing voters for this document to prevent duplicates
+        delete_query = "DELETE FROM voters WHERE document_id = %s"
+        with self.db_conn.cursor() as cur:
+            cur.execute(delete_query, (document_id,))
+            deleted_count = cur.rowcount
+            if deleted_count > 0:
+                logger.info(f"Deleted {deleted_count} existing voters for document {document_id}")
             
         query = """
             INSERT INTO voters (
@@ -508,7 +548,8 @@ class S3ToDBSyncer:
             execute_values(cur, query, values)
             
         self.db_conn.commit()
-        logger.info(f"Inserted {len(voters)} voters")
+        logger.info(f"Inserted {len(voters)} voters for document {document_id}")
+        
         
     def _ensure_connection(self):
         """Ensure database connection is active, reconnect if needed."""

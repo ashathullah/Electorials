@@ -394,10 +394,23 @@ def process_pdf(
         metadata_extractor = MetadataExtractor(context, force=True, output_identifier=args.output_identifier)
         if metadata_extractor.run() and metadata_extractor.result:
             document.metadata = metadata_extractor.result
+            
+            # Critical Check: Language Detection
+            if not document.metadata.language_detected:
+                logger.error("CRITICAL: Language not detected in metadata. Terminating processing for this file.")
+                document.status = "failed"
+                document.error = "Language not detected"
+                return document
+
             # Transfer AI usage from context to document stats
             if context.ai_usage:
                 document.stats.ai_usage = context.ai_usage
             store.save_metadata(context.pdf_name, metadata_extractor.result)
+        else:
+            logger.error("CRITICAL: Metadata extraction failed. Terminating processing for this file.")
+            document.status = "failed"
+            document.error = "Metadata extraction failed"
+            return document
     
     # Step 3: Crop voter boxes
     if args.step in ["crop", "all"]:
@@ -588,6 +601,30 @@ def process_pdf(
                     if result.extracted_count > 0:
                         output_path = store.save_document(document)
                         logger.info(f"Updated document with extracted house numbers: {output_path}")
+
+            # Step 5.6: Reprocess Missing Names
+            # Run this whenever we are checking for missing data (before CSV export)
+            if document.pages:
+                logger.info("Step 5.6: Checking for missing voter names and relations...")
+                from src.processors import MissingNameProcessor
+                
+                missing_name_proc = MissingNameProcessor(context, document)
+                if missing_name_proc.run():
+                    if missing_name_proc.result:
+                        result = missing_name_proc.result
+                        if result.missing_name_count > 0:
+                            logger.info(
+                                f"Missing names: found={result.missing_name_count}, "
+                                f"OCR-fixed={result.ocr_recovered_count}, "
+                                f"AI-fixed={result.ai_recovered_count}"
+                            )
+                        else:
+                            logger.info("No missing voter names found")
+                    
+                    # Update saved document if any recoveries happened
+                    if missing_name_proc.result and (missing_name_proc.result.ocr_recovered_count > 0 or missing_name_proc.result.ai_recovered_count > 0):
+                        output_path = store.save_document(document)
+                        logger.info(f"Updated document with recovered names: {output_path}")
         
     # Step 6: CSV Export
     if args.csv or args.step == "csv":
@@ -965,14 +1002,25 @@ def process_metadata_only(
     metadata_extractor = MetadataExtractor(context, force=True, output_identifier=args.output_identifier)
     if metadata_extractor.run() and metadata_extractor.result:
         document.metadata = metadata_extractor.result
+        
+        # Critical Check: Language Detection
+        if not document.metadata.language_detected:
+            logger.error("CRITICAL: Language not detected in metadata. Terminating processing for this file.")
+            document.status = "failed"
+            document.error = "Language not detected"
+            return document
+
         # Transfer AI usage from context to document stats
         if context.ai_usage:
             document.stats.ai_usage = context.ai_usage
         # NOTE: Do NOT call store.save_metadata here!
         # The metadata_extractor already saved the file with AI usage data
     else:
-        logger.warning(f"Metadata extraction failed for {folder.name}")
-    
+        logger.error(f"CRITICAL: Metadata extraction failed for {folder.name}")
+        document.status = "failed"
+        document.error = "Metadata extraction failed"
+        return document
+            
     # Finalize
     document.status = "completed"
     document.stats.total_time_sec = timer.elapsed

@@ -314,6 +314,18 @@ class MetadataExtractor(BaseProcessor):
         constituency = data.get("constituency_details", {})
         if not constituency:
             return False
+
+        # Validate Language Detection (Critical)
+        # Check both root and document_metadata (normalized structure)
+        doc_meta = data.get("document_metadata", {})
+        # If empty, fallback to root
+        if not doc_meta: 
+            doc_meta = data
+        
+        langs = doc_meta.get("language_detected")
+        if not langs or len(langs) == 0:
+            self.log_warning("Language detected field is empty or missing")
+            return False
             
         # Critical fields that should not be empty
         # Note: We check for truthiness, so None or "" will trigger retry

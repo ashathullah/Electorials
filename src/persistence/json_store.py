@@ -317,6 +317,13 @@ class JSONStore:
         else:
             pdf_name = document.pdf_name
             data = document.to_combined_json()
+            
+        # Safeguard: Ensure total_voters_extracted is synced in metadata
+        # This handles cases where we load an old JSON where this might be null
+        if data.get("metadata") and isinstance(data["metadata"], dict):
+            # If total_voters_extracted is missing/null/0, try to set it from top-level total_voters
+            if not data["metadata"].get("total_voters_extracted") and data.get("total_voters"):
+                 data["metadata"]["total_voters_extracted"] = data["total_voters"]
         
         output_dir = self._get_output_dir(pdf_name) / "csv"
         output_dir.mkdir(parents=True, exist_ok=True)

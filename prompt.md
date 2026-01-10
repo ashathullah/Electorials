@@ -85,6 +85,7 @@ Rules for Extraction:
 - "roll_type" and "roll_identification": Capture exactly as printed (e.g., "Supplement 1" and "Special Summary Revision 2025").
 - "sections": Extract the numbered list of sections found in Part 2 of the front page.
 - "detailed_elector_summary": Extract the serial number range and net total (by gender) from the back page summary table.
+  - **CRITICAL**: The "net_total.total" field MUST always be greater than 1. Electoral rolls NEVER contain only a single voter. If you detect a value of 1, re-examine the document carefully - you are likely reading the wrong field or misinterpreting the data.
 - "signature_present": Return true if any physical signature, seal, or mark is visible on the authority line.
 - "voters": MUST be returned as an empty array [].
 - Set missing or illegible fields to null.

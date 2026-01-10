@@ -607,6 +607,10 @@ def process_pdf(
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
         
+        # Also update metadata sidecar with final counts
+        if document.metadata:
+            store.save_metadata(context.pdf_name, document.metadata, total_voters_extracted=document.total_voters)
+        
         # Save to PostgreSQL if configured
         if config.db.is_configured:
             logger.info("Saving to PostgreSQL database...")
@@ -926,6 +930,10 @@ def process_extracted_folder(
     if args.step in ["ocr", "all"]:
         output_path = store.save_document(document)
         logger.info(f"Saved output: {output_path}")
+
+        # Also update metadata sidecar with final counts
+        if document.metadata:
+            store.save_metadata(context.pdf_name, document.metadata, total_voters_extracted=document.total_voters)
 
         # Save to PostgreSQL if configured
         if config.db.is_configured:

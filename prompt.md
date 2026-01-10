@@ -115,6 +115,21 @@ TIPS FOR TAMIL DOCUMENTS:
 - "Polling Station Address" often appears as "வாக்குச்சாவடியின் முகவரி".
 - "Polling Station Type" often appears as "வாக்குச்சாவடியின் வகைப்பாடு" (Look for "ஆண்" (Male) / "பெண்" (Female) / "பொது" (General)).
 - "Auxiliary Polling Station Count" often appears as "துணைவாக்குச் சாவடிகளின் எண்ணிக்கை".
+- "District" appears as "மாவட்டம்".
+- "Police Station" appears as "காவல் நிலையம்".
+- "Pin Code" appears as "அஞ்சல் குறியீட்டு எண்" or "பின்கோடு".
+- "Revenue Division" appears as "வருவாய் கோட்டம்".
+- "Ward" appears as "வார்டு".
+- "City/Town/Village" appears as "நகரம்/கிராமம்".
+- "Revision Type" appears as "திருத்தத்தின் தன்மை".
+- "Qualifying Date" appears as "தகுதி நாள்".
+- "Publication Date" appears as "வெளியிடப்பட்ட தேதி".
+- "Village Panchayat" appears as "கிராம ஊராட்சி".
+- "Town Panchayat" appears as "பேரூராட்சி".
+
+CRITICAL EXTRACTION RULES:
+- **Panchayat Name**: This field is often missed. Look for "Village Panchayat", "Town Panchayat", "Panchayat Union", or Tamil terms "ஊராட்சி", "பேரூராட்சி", "ஊராட்சி ஒன்றியம்". even if it appears small or in a corner, extract it. If it is part of a longer address line, extract just the name.
+- **Detailed Elector Summary**: You MUST extract the summary table from the back page (or wherever it appears). The 'net_total' fields are mandatory.
 
 the ward number should be a number
 

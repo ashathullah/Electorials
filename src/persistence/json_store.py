@@ -70,19 +70,24 @@ class JSONStore:
         
         return output_path
     
-    def save_metadata(self, pdf_name: str, metadata: DocumentMetadata) -> Path:
+    def save_metadata(self, pdf_name: str, metadata: DocumentMetadata, total_voters_extracted: Optional[int] = None) -> Path:
         """
         Save document metadata separately.
         
         Args:
             pdf_name: PDF name
             metadata: Metadata to save
+            total_voters_extracted: Optional number of voters extracted
         
         Returns:
             Path to saved file
         """
         output_dir = self._get_output_dir(pdf_name)
         output_path = output_dir / f"{pdf_name}-metadata.json"
+        
+        # Set total_voters_extracted if provided
+        if total_voters_extracted is not None:
+            metadata.total_voters_extracted = total_voters_extracted
         
         output_path.write_text(
             json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),

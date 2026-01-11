@@ -53,6 +53,31 @@ class PostgresRepository:
                 logger.error(f"Failed to connect to PostgreSQL: {e}")
                 raise
         return self._conn
+    
+    def test_connection(self) -> bool:
+        """
+        Test database connection.
+        
+        Returns:
+            True if connection is successful, False otherwise
+            
+        Raises:
+            Exception if connection fails (for early termination)
+        """
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                result = cur.fetchone()
+                if result and result[0] == 1:
+                    logger.info("Database connection test successful")
+                    return True
+                else:
+                    logger.error("Database connection test failed: unexpected result")
+                    raise Exception("Database connection test failed")
+        except Exception as e:
+            logger.error(f"Database connection test failed: {e}")
+            raise
         
     def init_db(self):
         """Initialize database schema."""

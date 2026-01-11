@@ -1105,6 +1105,44 @@ def main() -> int:
     logger.info("Electoral Roll PDF Processing Pipeline")
     logger.info(f"Debug mode: {'enabled' if config.debug else 'disabled'}")
     
+    # Database connection is MANDATORY - check before any processing
+    logger.info("=" * 60)
+    logger.info("DATABASE CONNECTION CHECK (MANDATORY)")
+    logger.info("=" * 60)
+    
+    if not config.db.is_configured:
+        logger.error("✗ Database is NOT configured in .env file")
+        logger.error("TERMINATING: Database connection is required for processing")
+        logger.info("")
+        logger.info("Please configure database in .env file:")
+        logger.info("  DB_HOST=localhost")
+        logger.info("  DB_PORT=5432")
+        logger.info("  DB_NAME=electoral_rolls")
+        logger.info("  DB_USER=postgres")
+        logger.info("  DB_PASSWORD=your_password")
+        logger.info("=" * 60)
+        return 1
+    
+    # Database is configured, verify connection
+    logger.info("✓ Database Configuration Found")
+    logger.info(f"    Host: {config.db.host}:{config.db.port}")
+    logger.info(f"    Database: {config.db.name}")
+    logger.info(f"    User: {config.db.user}")
+    logger.info("")
+    logger.info("Testing database connection...")
+    
+    try:
+        from src.persistence.postgres import PostgresRepository
+        db_repo = PostgresRepository(config.db)
+        db_repo.test_connection()
+        logger.info("✓ Database connection VERIFIED successfully")
+        logger.info("=" * 60)
+    except Exception as e:
+        logger.error(f"✗ Database connection FAILED: {e}")
+        logger.error("TERMINATING: Cannot proceed without database connection")
+        logger.info("=" * 60)
+        return 1
+    
     # Handle --list
     if args.list:
         list_extracted_folders(config)

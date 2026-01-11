@@ -98,7 +98,15 @@ class S3ToDBSyncer:
                 sslmode=self.config.db.ssl_mode
             )
             self.db_conn.autocommit = False
-            logger.info("Connected to PostgreSQL database")
+            
+            # Test the connection
+            with self.db_conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                result = cur.fetchone()
+                if not result or result[0] != 1:
+                    raise Exception("Database connection test failed")
+            
+            logger.info("Connected to PostgreSQL database (connection verified)")
         except Exception as e:
             raise ProcessingError(f"Failed to connect to database: {e}")
             

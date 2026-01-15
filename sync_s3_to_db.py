@@ -147,7 +147,12 @@ class S3ToDBSyncer:
             
             logger.info("Connected to PostgreSQL database (connection verified)")
         except Exception as e:
-            raise ProcessingError(f"Failed to connect to database: {e}")
+            if self.config.db.required:
+                raise ProcessingError(f"Failed to connect to database: {e}")
+            else:
+                logger.warning(f"Failed to connect to database: {e}")
+                logger.warning("DB_REQUIRED=false, continuing without database (sync operations will be limited)")
+                self.db_conn = None
             
     def _cleanup(self):
         """Clean up connections."""
@@ -269,8 +274,12 @@ class S3ToDBSyncer:
         Get set of pdf_names that already exist in the database.
         
         Returns:
-            Set of pdf_name strings
+            Set of pdf_name strings (empty set if no database connection)
         """
+        if self.db_conn is None:
+            logger.warning("No database connection available, returning empty set of existing documents")
+            return set()
+            
         logger.info("Fetching existing documents from database...")
         
         with self.db_conn.cursor() as cur:
@@ -429,6 +438,10 @@ class S3ToDBSyncer:
                 'signature_present': get_val('authority_verification_signature_present', ''),
             },
             'output_identifier': get_val('output_identifier', ''),
+            
+            # NEW: Flat metadata fields (for new schema columns)
+            'language_detected': get_val('language_detected', '[]'),  # May be JSON string or list
+            'total_flat': int(get_val(['total', 'detailed_elector_summary_net_total_total'], 0) or 0) or None,  # Flat total field
         }
         
         return data
@@ -502,6 +515,7 @@ class S3ToDBSyncer:
                 total_pages, total_voters_extracted, 
                 town_or_village, main_town_or_village, ward_number, post_office,
                 police_station, taluk_or_block, subdivision, district, pin_code, panchayat_name,
+                language_detected, total,
                 constituency_details, administrative_address,
                 polling_details, detailed_elector_summary, authority_verification,
                 output_identifier
@@ -511,6 +525,7 @@ class S3ToDBSyncer:
                 %s, %s, 
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
+                %s, %s,
                 %s, %s,
                 %s, %s, %s,
                 %s
@@ -551,6 +566,8 @@ class S3ToDBSyncer:
                 metadata['district'],
                 metadata['pin_code'],
                 metadata['panchayat_name'],
+                Json(parse_json_field(metadata.get('language_detected', '[]'))),  # NEW: Flat field
+                metadata.get('total_flat'),  # NEW: Flat field
                 Json(parse_json_field(metadata['constituency_details'])),
                 Json(parse_json_field(metadata['administrative_address'])),
                 Json(parse_json_field(metadata['polling_details'])),

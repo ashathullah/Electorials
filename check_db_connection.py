@@ -47,8 +47,15 @@ def main():
         print("  DB_USER=postgres")
         print("  DB_PASSWORD=your_password")
         print("  DB_SSL_MODE=prefer")
+        print("  DB_REQUIRED=true  # Set to true if database is mandatory")
         print()
-        return 0
+        
+        if config.db.required:
+            print("✗ Database is REQUIRED (DB_REQUIRED=true) but not configured")
+            return 1
+        else:
+            print("✓ Database is optional (DB_REQUIRED=false), application can proceed")
+            return 0
     
     print(f"✓ Database is configured:")
     print(f"    Host: {config.db.host}")
@@ -56,6 +63,7 @@ def main():
     print(f"    Database: {config.db.name}")
     print(f"    User: {config.db.user}")
     print(f"    SSL Mode: {config.db.ssl_mode}")
+    print(f"    Required: {config.db.required}")
     print()
     
     # Test connection
@@ -66,15 +74,25 @@ def main():
         from src.persistence.postgres import PostgresRepository
         
         db_repo = PostgresRepository(config.db)
-        db_repo.test_connection()
+        connection_successful = db_repo.test_connection()
         
-        print("=" * 60)
-        print("✓ DATABASE CONNECTION SUCCESSFUL!")
-        print("=" * 60)
-        print()
-        print("The database is reachable and ready for use.")
-        print()
-        return 0
+        if connection_successful:
+            print("=" * 60)
+            print("✓ DATABASE CONNECTION SUCCESSFUL!")
+            print("=" * 60)
+            print()
+            print("The database is reachable and ready for use.")
+            print()
+            return 0
+        else:
+            # test_connection returned False (DB not required)
+            print("=" * 60)
+            print("⚠ DATABASE CONNECTION FAILED!")
+            print("=" * 60)
+            print()
+            print("However, DB_REQUIRED=false, so the application can proceed without database.")
+            print()
+            return 0
         
     except Exception as e:
         print("=" * 60)
@@ -83,14 +101,23 @@ def main():
         print()
         print(f"Error: {e}")
         print()
-        print("Possible causes:")
-        print("  - Database server is not running")
-        print("  - Incorrect host/port in configuration")
-        print("  - Incorrect username/password")
-        print("  - Database does not exist")
-        print("  - Network/firewall issues")
-        print()
-        return 1
+        
+        if config.db.required:
+            print("Database is REQUIRED (DB_REQUIRED=true)")
+            print()
+            print("Possible causes:")
+            print("  - Database server is not running")
+            print("  - Incorrect host/port in configuration")
+            print("  - Incorrect username/password")
+            print("  - Database does not exist")
+            print("  - Network/firewall issues")
+            print()
+            return 1
+        else:
+            print("Database is optional (DB_REQUIRED=false)")
+            print("The application can proceed without database.")
+            print()
+            return 0
 
 
 if __name__ == "__main__":

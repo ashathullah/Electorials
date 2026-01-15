@@ -93,7 +93,7 @@ class DatabaseS3Cleaner:
         query = """
             SELECT document_id
             FROM metadata
-            WHERE (detailed_elector_summary -> 'net_total' ->> 'total')::int <> total_voters_extracted;
+            WHERE total <> total_voters_extracted;
         """
         
         cursor = self.db_conn.cursor()

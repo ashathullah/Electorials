@@ -16,3 +16,7 @@ test_*
 missing_voters_pdfs/
 csv_cache/
 aws/
+debug_images/
+extracted_images/
+extracted_numbers/
+first_pages/

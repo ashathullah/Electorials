@@ -793,17 +793,35 @@ class OCRProcessor(BaseProcessor):
             
             # OPTIMIZATION: Try to extract EPIC from full text first to avoid Tesseract/ROI overhead
             # This saves ~100-200ms per voter if successful
+            # Epic ID format: Always 3 letters + 7 digits = 10 characters total
             epic_found_in_text = False
-            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text_for_extract.upper())
+            match = re.search(r'\b([A-Z]{3}\d{7})\b', full_text_for_extract.upper())
             if match:
-                result.epic_no = match.group(1)
-                result.epic_valid = True
-                epic_found_in_text = True
+                epic_candidate = match.group(1)
+                # Validate: Must be exactly 10 characters (3 letters + 7 digits)
+                if len(epic_candidate) == 10:
+                    result.epic_no = epic_candidate
+                    result.epic_valid = True
+                    epic_found_in_text = True
+                else:
+                    # This shouldn't happen with the regex, but safety check
+                    self.log_debug(f"Epic ID length mismatch ({epic_candidate}), treating as invalid")
+                    epic_found_in_text = False
             
             if not epic_found_in_text:
                 # Fallback to expensive ROI extraction
                 result.epic_no = self._extract_epic(segment)
-                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+                # FIX: If Epic ID has exactly 11 characters (3 letters + 8 digits), treat as invalid
+                # and force AI retry. Valid Epic IDs are exactly 10 characters (3 letters + 7 digits)
+                if len(result.epic_no) == 11:
+                    self.log_debug(f"ROI Epic ID has 11 characters ({result.epic_no}), marking as invalid")
+                    result.epic_valid = False
+                elif len(result.epic_no) == 10:
+                    # Validate format: exactly 3 letters + 7 digits
+                    result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d{7}", result.epic_no))
+                else:
+                    # Any other length is also invalid
+                    result.epic_valid = False
             
             # Serial is harder to regex reliably (often just digits), so we keep ROI for now.
             # Extract Serial from ROI (Opencv/Tesseract)
@@ -1042,9 +1060,13 @@ class OCRProcessor(BaseProcessor):
             
             # 1. Try ROI extraction first (fastest and often most accurate for EPIC)
             epic = self._extract_epic(img_bgr)
-            if re.fullmatch(r"[A-Z]{3}\d+", epic):
+            # FIX: If Epic ID has exactly 11 characters, skip this and try AI
+            # Valid Epic IDs are exactly 10 characters (3 letters + 7 digits)
+            if len(epic) == 10 and re.fullmatch(r"[A-Z]{3}\d{7}", epic):
                 self.log_debug(f"EPIC retry successful (ROI): {epic}")
                 return epic
+            elif len(epic) == 11:
+                self.log_debug(f"ROI Epic ID has 11 characters ({epic}), skipping to AI retry")
             
             # 2. Try OCR on just the cropped EPIC region
             epic = self._retry_epic_from_roi_crop(img_bgr, image_name)
@@ -1106,10 +1128,16 @@ class OCRProcessor(BaseProcessor):
                         pass
             
             # Extract EPIC from OCR text
+            # Epic ID format: Always 3 letters + 7 digits = 10 characters total
             full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
-            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+            match = re.search(r'\b([A-Z]{3}\d{7})\b', full_text.upper())
             if match:
-                return match.group(1)
+                epic_candidate = match.group(1)
+                # Reject if it's 11 characters (likely OCR error)
+                if len(epic_candidate) == 10:
+                    return epic_candidate
+                elif len(epic_candidate) == 11:
+                    self.log_debug(f"ROI crop OCR returned 11-character Epic ID ({epic_candidate}), rejecting")
                 
         except Exception as e:
             self.log_debug(f"EPIC ROI crop OCR error: {e}")
@@ -1134,9 +1162,14 @@ class OCRProcessor(BaseProcessor):
             ai_result = self._ai_deleted_detector.extract_fields(image_array=epic_crop)
             
             if ai_result.epic_no:
-                # Validate the format
-                if re.fullmatch(r"[A-Z]{3}\d{7,10}", ai_result.epic_no):
+                # Validate the format: Must be exactly 3 letters + 7 digits = 10 characters total
+                # FIX: Explicitly reject 11-character Epic IDs even from AI results
+                if len(ai_result.epic_no) == 10 and re.fullmatch(r"[A-Z]{3}\d{7}", ai_result.epic_no):
                     return ai_result.epic_no
+                elif len(ai_result.epic_no) == 11:
+                    self.log_warning(f"AI returned 11-character Epic ID ({ai_result.epic_no}), rejecting")
+                else:
+                    self.log_debug(f"AI returned Epic ID with invalid format/length ({ai_result.epic_no})")
                     
         except Exception as e:
             self.log_debug(f"EPIC AI extraction error: {e}")
@@ -1161,10 +1194,14 @@ class OCRProcessor(BaseProcessor):
             words = text.split()
             if words: lines.insert(0, "__RAW__:" + "|".join(words))
             
-            epic_match = re.search(r'\b([A-Z]{3}\d{7,10})\b', text.upper())
+            # Epic ID format: Always 3 letters + 7 digits = 10 characters total
+            epic_match = re.search(r'\b([A-Z]{3}\d{7})\b', text.upper())
             if epic_match:
-                result.epic_no = epic_match.group(1)
-                result.epic_valid = True
+                epic_candidate = epic_match.group(1)
+                # Only accept if exactly 10 characters (reject 11-character IDs)
+                if len(epic_candidate) == 10:
+                    result.epic_no = epic_candidate
+                    result.epic_valid = True
             
             serial_match = re.search(r'^\s*(\d{1,4})\b', text)
             if serial_match:
@@ -1451,15 +1488,25 @@ class OCRProcessor(BaseProcessor):
             
             # Extract EPIC from ROI (always uses Tesseract if available for best results)
             result.epic_no = self._extract_epic(img_bgr)
-            result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+            # Validate: Must be exactly 10 characters (3 letters + 7 digits)
+            if len(result.epic_no) == 11:
+                self.log_debug(f"ROI Epic ID has 11 characters ({result.epic_no}), marking as invalid")
+                result.epic_valid = False
+            elif len(result.epic_no) == 10:
+                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d{7}", result.epic_no))
+            else:
+                result.epic_valid = False
             
             # Fallback: Check full text for EPIC if ROI failed
             if not result.epic_valid:
                 full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
-                match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+                match = re.search(r'\b([A-Z]{3}\d{7})\b', full_text.upper())
                 if match:
-                    result.epic_no = match.group(1)
-                    result.epic_valid = True
+                    epic_candidate = match.group(1)
+                    # Only accept if exactly 10 characters
+                    if len(epic_candidate) == 10:
+                        result.epic_no = epic_candidate
+                        result.epic_valid = True
             
             # Extract Serial from ROI
             result.serial_no = self._extract_serial(img_bgr)
@@ -1635,17 +1682,28 @@ class OCRProcessor(BaseProcessor):
             full_text = " ".join(line for line in lines if not line.startswith("__RAW__:"))
             
             # Try to extract EPIC from full text first
+            # Epic ID format: Always 3 letters + 7 digits = 10 characters total
             epic_found_in_text = False
-            match = re.search(r'\b([A-Z]{3}\d{6,10})\b', full_text.upper())
+            match = re.search(r'\b([A-Z]{3}\d{7})\b', full_text.upper())
             if match:
-                result.epic_no = match.group(1)
-                result.epic_valid = True
-                epic_found_in_text = True
+                epic_candidate = match.group(1)
+                # Only accept if exactly 10 characters
+                if len(epic_candidate) == 10:
+                    result.epic_no = epic_candidate
+                    result.epic_valid = True
+                    epic_found_in_text = True
             
             if not epic_found_in_text:
                 # Fallback to ROI extraction
                 result.epic_no = self._extract_epic(segment)
-                result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d+", result.epic_no))
+                # Validate: Must be exactly 10 characters (3 letters + 7 digits)
+                if len(result.epic_no) == 11:
+                    self.log_debug(f"ROI Epic ID has 11 characters ({result.epic_no}), marking as invalid")
+                    result.epic_valid = False
+                elif len(result.epic_no) == 10:
+                    result.epic_valid = bool(re.fullmatch(r"[A-Z]{3}\d{7}", result.epic_no))
+                else:
+                    result.epic_valid = False
             
             # Extract Serial from ROI
             result.serial_no = self._extract_serial(segment)
